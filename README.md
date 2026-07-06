@@ -12,7 +12,13 @@
 
 ## 效果演示
 
-![效果演示](assets/demo.png)
+### 每日查询
+
+![每日查询效果](assets/demo.png)
+
+### 群内提醒
+
+![群内提醒效果](assets/reminder.png)
 
 ## 功能特点
 
