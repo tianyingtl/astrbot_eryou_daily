@@ -234,8 +234,6 @@ def parse_commission_command(message: str) -> tuple[str, str] | None:
         if rest.startswith("扫码"):
             game_text = rest[len("扫码"):].strip()
             return ("qr", resolve_game_key(game_text) or "")
-        if rest.startswith("手机号"):
-            return ("phone", rest[len("手机号"):].strip())
         if rest == "确认":
             return ("confirm", "")
         if rest == "解绑":
@@ -289,8 +287,8 @@ def format_help() -> str:
             "/委托：检查已绑定游戏的今日每日状态",
             "/委托 星铁/原神/绝区零：检查指定游戏",
             "/委托绑定：选择要绑定的游戏",
-            "/委托绑定 星铁/原神/绝区零：选择要绑定的游戏",
-            "/委托扫码：使用米游社 App 扫码登录",
+            "/委托绑定 星铁/原神/绝区零：直接发送米游社登录二维码",
+            "/委托扫码：二维码过期时重新生成",
             "/委托确认：扫码确认后完成绑定",
             "/委托设置 星铁 20:00：到点未完成时在本群提醒你",
             "/委托解绑：删除本地绑定",
@@ -315,28 +313,8 @@ def format_game_menu() -> str:
             "/委托绑定 原神",
             "/委托绑定 绝区零",
             "",
+            "发送后机器人会私聊米游社登录二维码。",
             "说明：绑定的是米游社账号。以后同一米游社账号支持更多米家游戏时，不需要重复登录。",
-        ]
-    )
-
-
-def format_login_menu(game_key: str) -> str:
-    return "\n".join(
-        [
-            f"已选择：{game_name(game_key)}",
-            "请选择登录方式：",
-            "/委托扫码：推荐，用米游社 App 扫码确认",
-            "/委托手机号：查看手机号登录说明",
-        ]
-    )
-
-
-def format_phone_login_notice() -> str:
-    return "\n".join(
-        [
-            "手机号登录暂不在公开版里直接接收验证码。",
-            "原因：米游社手机号登录通常需要极验人机验证，机器人直接收手机号和验证码不安全也不稳定。",
-            "请使用推荐方式：/委托扫码",
         ]
     )
 

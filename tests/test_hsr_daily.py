@@ -9,7 +9,6 @@ from hsr_daily import (
     GAME_KEY_ZZZ,
     format_game_menu,
     format_group_bind_guide,
-    format_login_menu,
     format_note_status,
     is_daily_done,
     parse_commission_command,
@@ -28,7 +27,6 @@ class HsrDailyTest(unittest.TestCase):
         self.assertEqual(parse_commission_command("/委托绑定 原神"), ("bind_game", GAME_KEY_GENSHIN))
         self.assertEqual(parse_commission_command("/委托绑定 绝区零"), ("bind_game", GAME_KEY_ZZZ))
         self.assertEqual(parse_commission_command("/委托扫码"), ("qr", ""))
-        self.assertEqual(parse_commission_command("/委托手机号"), ("phone", ""))
         self.assertEqual(parse_commission_command("/委托确认"), ("confirm", ""))
         self.assertEqual(parse_commission_command("/委托设置 星铁 20:00"), ("reminder_set", "星铁 20:00"))
         self.assertEqual(parse_commission_command("/委托解绑"), ("unbind", ""))
@@ -38,7 +36,7 @@ class HsrDailyTest(unittest.TestCase):
         self.assertIn("/委托绑定 星铁", format_game_menu())
         self.assertIn("/委托绑定 原神", format_game_menu())
         self.assertIn("/委托绑定 绝区零", format_game_menu())
-        self.assertIn("/委托扫码", format_login_menu(GAME_KEY_HSR))
+        self.assertIn("私聊米游社登录二维码", format_game_menu())
         self.assertNotIn("/委托扫码", format_group_bind_guide())
 
     def test_parse_reminder_value(self):

@@ -22,10 +22,8 @@ try:
         fetch_daily_note,
         format_game_menu,
         format_help,
-        format_login_menu,
         format_note_status,
         format_not_bound,
-        format_phone_login_notice,
         format_reminder_usage,
         get_game_roles,
         game_name,
@@ -48,10 +46,8 @@ except ImportError:
         fetch_daily_note,
         format_game_menu,
         format_help,
-        format_login_menu,
         format_note_status,
         format_not_bound,
-        format_phone_login_notice,
         format_reminder_usage,
         get_game_roles,
         game_name,
@@ -106,11 +102,23 @@ class EryouDailyPlugin(Star):
         elif action == "bind_game_menu":
             reply = await self._private_reply(event, sender_key, format_game_menu())
         elif action == "bind_game":
-            reply = await self._private_reply(
-                event,
-                sender_key,
-                await self._choose_game(sender_key, value),
-            )
+            if not is_supported_game(value):
+                reply = f"当前支持绑定：{supported_game_text()}。示例：/委托绑定 星铁"
+            elif self.bindings.get_account_cookie(sender_key):
+                cookie = self.bindings.get_account_cookie(sender_key)
+                reply = await self._bind_game_from_cookie(sender_key, value, cookie)
+            else:
+                text, image_path = await self._start_qr(sender_key, value)
+                if _is_private_event(event):
+                    yield event.plain_result(text)
+                    if image_path:
+                        yield event.image_result(str(image_path))
+                else:
+                    yield event.plain_result(
+                        await self._private_reply(event, sender_key, text, image_path)
+                    )
+                event.stop_event()
+                return
         elif action == "qr":
             text, image_path = await self._start_qr(sender_key, value)
             if _is_private_event(event):
@@ -128,12 +136,6 @@ class EryouDailyPlugin(Star):
                 event,
                 sender_key,
                 await self._confirm_qr(sender_key),
-            )
-        elif action == "phone":
-            reply = await self._private_reply(
-                event,
-                sender_key,
-                format_phone_login_notice(),
             )
         elif action == "reminder_set":
             reply = await self._set_reminder(event, sender_key, value)
@@ -171,17 +173,6 @@ class EryouDailyPlugin(Star):
         if sent:
             return "绑定说明已经私聊发送给你了，请去私聊窗口继续操作。"
         return "我没法主动私聊你。请先私聊机器人发送 /委托绑定，再继续绑定。"
-
-    async def _choose_game(self, sender_key: str, game_key: str) -> str:
-        if not is_supported_game(game_key):
-            return f"当前支持绑定：{supported_game_text()}。示例：/委托绑定 星铁"
-
-        cookie = self.bindings.get_account_cookie(sender_key)
-        if not cookie:
-            self.bindings.set_pending(sender_key, {"game": game_key, "created_at": int(time())})
-            return format_login_menu(game_key)
-
-        return await self._bind_game_from_cookie(sender_key, game_key, cookie)
 
     async def _set_reminder(self, event: AstrMessageEvent, sender_key: str, value: str) -> str:
         group_id = _get_group_id(event)
@@ -247,7 +238,7 @@ class EryouDailyPlugin(Star):
                     f"已选择：{game_name(game_key)}",
                     "请用米游社 App 扫描二维码并确认登录。",
                     "确认后回到这里发送：/委托确认",
-                    "二维码过期后重新发送：/委托扫码",
+                    f"二维码过期后重新发送：/委托绑定 {game_name(game_key)}",
                 ]
             ),
             image_path,
@@ -256,7 +247,7 @@ class EryouDailyPlugin(Star):
     async def _confirm_qr(self, sender_key: str) -> str:
         pending = self.bindings.get_pending(sender_key)
         if not pending or not pending.get("ticket"):
-            return "没有进行中的扫码登录。请先发送 /委托绑定 星铁，然后选择 /委托扫码。"
+            return "没有进行中的扫码登录。请先发送 /委托绑定 星铁。"
 
         try:
             cookie = await asyncio.to_thread(
