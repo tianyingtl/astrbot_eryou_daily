@@ -1,6 +1,6 @@
 name: astrbot_eryou_daily
-desc: 检测崩坏：星穹铁道每日实训状态
-version: v1.0.1
+desc: 检测星铁、原神、绝区零每日状态
+version: v1.0.2
 author: tianying
 repo: "https://github.com/tianyingtl/astrbot_eryou_daily"
 support_platforms:

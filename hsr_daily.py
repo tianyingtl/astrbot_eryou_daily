@@ -14,12 +14,24 @@ from urllib.request import Request, urlopen
 
 
 GAME_KEY_HSR = "hkrpg"
+GAME_KEY_GENSHIN = "genshin"
+GAME_KEY_ZZZ = "zzz"
 GAMES = {
     GAME_KEY_HSR: {
         "name": "崩坏：星穹铁道",
         "short_name": "星铁",
         "game_biz": "hkrpg_cn",
-    }
+    },
+    GAME_KEY_GENSHIN: {
+        "name": "原神",
+        "short_name": "原神",
+        "game_biz": "hk4e_cn",
+    },
+    GAME_KEY_ZZZ: {
+        "name": "绝区零",
+        "short_name": "绝区零",
+        "game_biz": "nap_cn",
+    },
 }
 GAME_ALIASES = {
     "星铁": GAME_KEY_HSR,
@@ -29,10 +41,27 @@ GAME_ALIASES = {
     "崩坏：星穹铁道": GAME_KEY_HSR,
     "hkrpg": GAME_KEY_HSR,
     "starrail": GAME_KEY_HSR,
+    "原神": GAME_KEY_GENSHIN,
+    "genshin": GAME_KEY_GENSHIN,
+    "yuanshen": GAME_KEY_GENSHIN,
+    "ys": GAME_KEY_GENSHIN,
+    "绝区零": GAME_KEY_ZZZ,
+    "绝区": GAME_KEY_ZZZ,
+    "zzz": GAME_KEY_ZZZ,
+    "zenless": GAME_KEY_ZZZ,
+    "zenlesszonezero": GAME_KEY_ZZZ,
+    "nap": GAME_KEY_ZZZ,
 }
 
 BINDING_URL = "https://api-takumi.mihoyo.com/binding/api/getUserGameRolesByCookie"
-NOTE_URL = "https://api-takumi-record.mihoyo.com/game_record/app/hkrpg/api/note"
+HSR_NOTE_URL = "https://api-takumi-record.mihoyo.com/game_record/app/hkrpg/api/note"
+GENSHIN_NOTE_URL = "https://api-takumi-record.mihoyo.com/game_record/app/genshin/api/dailyNote"
+ZZZ_NOTE_URL = "https://api-takumi-record.mihoyo.com/event/game_record_zzz/api/zzz/note"
+NOTE_URLS = {
+    GAME_KEY_HSR: HSR_NOTE_URL,
+    GAME_KEY_GENSHIN: GENSHIN_NOTE_URL,
+    GAME_KEY_ZZZ: ZZZ_NOTE_URL,
+}
 QR_CREATE_URL = "https://passport-api.miyoushe.com/account/ma-cn-passport/web/createQRLogin"
 QR_QUERY_URL = "https://passport-api.miyoushe.com/account/ma-cn-passport/web/queryQRLoginStatus"
 
@@ -65,6 +94,9 @@ class BindingStore:
 
     def get_game_binding(self, sender_key: str, game_key: str) -> dict[str, Any] | None:
         return self._get_user(sender_key).get("games", {}).get(game_key)
+
+    def get_game_bindings(self, sender_key: str) -> dict[str, dict[str, Any]]:
+        return self._get_user(sender_key).get("games", {})
 
     def set_game_binding(self, sender_key: str, game_key: str, role: dict[str, Any]) -> None:
         data = self._load()
@@ -180,13 +212,13 @@ def parse_commission_command(message: str) -> tuple[str, str] | None:
     text = (message or "").strip()
     for prefix in ("/委托", "／委托"):
         if text == prefix:
-            return ("check", GAME_KEY_HSR)
+            return ("check", "")
         if not text.startswith(prefix):
             continue
 
         rest = text[len(prefix):].strip()
         if not rest:
-            return ("check", GAME_KEY_HSR)
+            return ("check", "")
         if rest.lower() == "help" or rest == "帮助":
             return ("help", "")
         if rest.startswith("设置"):
@@ -206,6 +238,9 @@ def parse_commission_command(message: str) -> tuple[str, str] | None:
             return ("confirm", "")
         if rest == "解绑":
             return ("unbind", "")
+        game_key = resolve_game_key(rest)
+        if game_key:
+            return ("check", game_key)
         return ("unknown", rest)
     return None
 
@@ -217,7 +252,7 @@ def parse_reminder_value(value: str) -> tuple[str | None, str | None, str | None
 
     game_key = resolve_game_key(parts[0])
     if not game_key:
-        return None, None, "暂时只支持星铁。正确格式：/委托设置 星铁 20:00"
+        return None, None, "当前支持设置提醒：星铁、原神、绝区零。正确格式：/委托设置 星铁 20:00"
 
     match = re.fullmatch(r"([01]?\d|2[0-3])[:：]([0-5]\d)", parts[1])
     if not match:
@@ -237,13 +272,22 @@ def game_name(game_key: str) -> str:
     return GAMES.get(game_key, {}).get("name", game_key)
 
 
+def supported_game_text() -> str:
+    return "、".join(game["short_name"] for game in GAMES.values())
+
+
+def is_supported_game(game_key: str) -> bool:
+    return game_key in GAMES
+
+
 def format_help() -> str:
     return "\n".join(
         [
             "二游每日检查：",
-            "/委托：检查崩坏：星穹铁道今日每日实训",
+            "/委托：检查已绑定游戏的今日每日状态",
+            "/委托 星铁/原神/绝区零：检查指定游戏",
             "/委托绑定：选择要绑定的游戏",
-            "/委托绑定 星铁：直接选择崩坏：星穹铁道",
+            "/委托绑定 星铁/原神/绝区零：选择要绑定的游戏",
             "/委托扫码：使用米游社 App 扫码登录",
             "/委托确认：扫码确认后完成绑定",
             "/委托设置 星铁 20:00：到点未完成时在本群提醒你",
@@ -266,6 +310,8 @@ def format_game_menu() -> str:
         [
             "请选择要绑定的游戏：",
             "/委托绑定 星铁",
+            "/委托绑定 原神",
+            "/委托绑定 绝区零",
             "",
             "说明：绑定的是米游社账号。以后同一米游社账号支持更多米家游戏时，不需要重复登录。",
         ]
@@ -296,8 +342,8 @@ def format_phone_login_notice() -> str:
 def format_not_bound() -> str:
     return "\n".join(
         [
-            "你还没有绑定星铁。",
-            "请私聊机器人发送 /委托绑定，然后按提示选择 星铁 -> 扫码 -> 确认。",
+            "你还没有绑定游戏。",
+            "请私聊机器人发送 /委托绑定，然后按提示选择游戏 -> 扫码 -> 确认。",
         ]
     )
 
@@ -307,6 +353,7 @@ def format_reminder_usage() -> str:
         [
             "格式不对。正确格式：/委托设置 游戏名 时间",
             "示例：/委托设置 星铁 20:00",
+            "支持游戏：星铁、原神、绝区零。",
             "时间格式：24小时制 HH:MM，例如 08:30、20:00。",
         ]
     )
@@ -356,11 +403,20 @@ def get_login_cookie_by_qr(ticket: str, device_id: str) -> str:
     return cookie
 
 
-def get_hsr_roles(cookie: str) -> list[dict[str, Any]]:
-    payload = _api_get(BINDING_URL, cookie, {"game_biz": "hkrpg_cn"}, with_ds=False)
+def get_game_roles(cookie: str, game_key: str) -> list[dict[str, Any]]:
+    game = GAMES.get(game_key)
+    if not game:
+        raise HsrApiError("当前版本不支持这个游戏。")
+
+    game_biz = game["game_biz"]
+    payload = _api_get(BINDING_URL, cookie, {"game_biz": game_biz}, with_ds=False)
     data = _unwrap_payload(payload)
     roles = data.get("list") or []
-    return [role for role in roles if role.get("game_biz") in {None, "hkrpg_cn"}]
+    return [role for role in roles if role.get("game_biz") in {None, game_biz}]
+
+
+def get_hsr_roles(cookie: str) -> list[dict[str, Any]]:
+    return get_game_roles(cookie, GAME_KEY_HSR)
 
 
 def select_default_role(roles: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -376,16 +432,47 @@ def select_default_role(roles: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def fetch_hsr_daily_note(cookie: str, role: dict[str, Any]) -> dict[str, Any]:
+    return fetch_daily_note(cookie, role, GAME_KEY_HSR)
+
+
+def fetch_daily_note(cookie: str, role: dict[str, Any], game_key: str) -> dict[str, Any]:
     role_id = role.get("game_uid") or role.get("uid")
     server = role.get("region")
     if not role_id or not server:
         raise HsrApiError("绑定的角色信息不完整，请重新绑定。")
+    url = NOTE_URLS.get(game_key)
+    if not url:
+        raise HsrApiError("当前版本不支持这个游戏。")
 
-    payload = _api_get(NOTE_URL, cookie, {"server": server, "role_id": role_id}, with_ds=True)
+    payload = _api_get(url, cookie, {"server": server, "role_id": role_id}, with_ds=True)
     return _unwrap_payload(payload)
 
 
-def format_note_status(role: dict[str, Any], note: dict[str, Any]) -> str:
+def format_note_status(game_key: str, role: dict[str, Any], note: dict[str, Any]) -> str:
+    if game_key == GAME_KEY_GENSHIN:
+        return _format_genshin_status(role, note)
+    if game_key == GAME_KEY_ZZZ:
+        return _format_zzz_status(role, note)
+    return _format_hsr_status(role, note)
+
+
+def is_daily_done(game_key: str, note: dict[str, Any]) -> bool:
+    if game_key == GAME_KEY_GENSHIN:
+        return is_genshin_done(note)
+    if game_key == GAME_KEY_ZZZ:
+        return is_zzz_done(note)
+    return is_train_done(note)
+
+
+def daily_missing_text(game_key: str) -> str:
+    if game_key == GAME_KEY_GENSHIN:
+        return "每日委托还没完成或奖励未领取"
+    if game_key == GAME_KEY_ZZZ:
+        return "今日活跃还没完成"
+    return "每日实训还没完成"
+
+
+def _format_hsr_status(role: dict[str, Any], note: dict[str, Any]) -> str:
     nickname = role.get("nickname") or "未知角色"
     uid = role.get("game_uid") or role.get("uid") or "未知 UID"
 
@@ -407,10 +494,74 @@ def format_note_status(role: dict[str, Any], note: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _format_genshin_status(role: dict[str, Any], note: dict[str, Any]) -> str:
+    nickname = role.get("nickname") or "未知角色"
+    uid = role.get("game_uid") or role.get("uid") or "未知 UID"
+
+    current = _first_int(note, "current_commission_num")
+    max_count = _first_int(note, "max_commission_num") or 4
+    reward_received = bool(note.get("is_extra_task_reward_received"))
+    done = is_genshin_done(note)
+
+    lines = [
+        "原神今日委托检查",
+        f"账号：{nickname}（UID {uid}）",
+        f"每日委托：{_score_text(current)}/{max_count}，{'已完成' if current is not None and current >= max_count else '未完成'}",
+        f"凯瑟琳奖励：{'已领取' if reward_received else '未领取'}",
+    ]
+
+    if done:
+        lines.append("今天的每日已经 Clear。")
+    else:
+        misses = []
+        if current is None or current < max_count:
+            misses.append("每日委托还没满")
+        if not reward_received:
+            misses.append("凯瑟琳奖励未领取")
+        lines.append("还没 Clear：" + "；".join(misses) + "。")
+
+    return "\n".join(lines)
+
+
+def _format_zzz_status(role: dict[str, Any], note: dict[str, Any]) -> str:
+    nickname = role.get("nickname") or "未知角色"
+    uid = role.get("game_uid") or role.get("uid") or "未知 UID"
+
+    current, max_count = _zzz_vitality(note)
+    card_sign = _zzz_card_sign_text(note)
+    done = is_zzz_done(note)
+
+    lines = [
+        "绝区零今日委托检查",
+        f"账号：{nickname}（UID {uid}）",
+        f"今日活跃：{_score_text(current)}/{max_count}，{'已完成' if done else '未完成'}",
+    ]
+    if card_sign:
+        lines.append(f"刮刮卡：{card_sign}")
+
+    if done:
+        lines.append("今天的每日已经 Clear。")
+    else:
+        lines.append("还没 Clear：今日活跃还没满。")
+
+    return "\n".join(lines)
+
+
 def is_train_done(note: dict[str, Any]) -> bool:
     current_train = _first_int(note, "current_train_score")
     max_train = _first_int(note, "max_train_score") or 500
     return current_train is not None and current_train >= max_train
+
+
+def is_genshin_done(note: dict[str, Any]) -> bool:
+    current = _first_int(note, "current_commission_num")
+    max_count = _first_int(note, "max_commission_num") or 4
+    return current is not None and current >= max_count and bool(note.get("is_extra_task_reward_received"))
+
+
+def is_zzz_done(note: dict[str, Any]) -> bool:
+    current, max_count = _zzz_vitality(note)
+    return current is not None and current >= max_count
 
 
 def _api_get(url: str, cookie: str, params: dict[str, Any], with_ds: bool) -> dict[str, Any]:
@@ -533,6 +684,36 @@ def _first_int(data: dict[str, Any], *keys: str) -> int | None:
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _zzz_vitality(note: dict[str, Any]) -> tuple[int | None, int]:
+    vitality = note.get("vitality")
+    if not isinstance(vitality, dict):
+        vitality = note.get("engagement")
+    if not isinstance(vitality, dict):
+        vitality = {}
+
+    current = _first_int(vitality, "current", "cur_point", "current_progress", "value")
+    max_count = _first_int(vitality, "max", "max_point", "total", "target") or 400
+    return current, max_count
+
+
+def _zzz_card_sign_text(note: dict[str, Any]) -> str:
+    value = note.get("card_sign")
+    if isinstance(value, dict):
+        value = value.get("status") or value.get("state") or value.get("done")
+    if value is True:
+        return "已刮"
+    if value is False:
+        return "未刮"
+    text = str(value or "")
+    if not text:
+        return ""
+    if text in {"CardSignDone", "Done", "Finished", "1"}:
+        return "已刮"
+    if text in {"CardSignNotDone", "NotDone", "0"}:
+        return "未刮"
+    return text
 
 
 def _score_text(value: int | None) -> str:

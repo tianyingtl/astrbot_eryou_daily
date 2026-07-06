@@ -18,7 +18,8 @@ try:
         BindingStore,
         HsrApiError,
         create_qr_login,
-        fetch_hsr_daily_note,
+        daily_missing_text,
+        fetch_daily_note,
         format_game_menu,
         format_help,
         format_login_menu,
@@ -26,14 +27,16 @@ try:
         format_not_bound,
         format_phone_login_notice,
         format_reminder_usage,
+        get_game_roles,
         game_name,
-        get_hsr_roles,
         get_login_cookie_by_qr,
-        is_train_done,
+        is_daily_done,
+        is_supported_game,
         parse_commission_command,
         parse_reminder_value,
         save_qr_image,
         select_default_role,
+        supported_game_text,
     )
 except ImportError:
     from hsr_daily import (
@@ -41,7 +44,8 @@ except ImportError:
         BindingStore,
         HsrApiError,
         create_qr_login,
-        fetch_hsr_daily_note,
+        daily_missing_text,
+        fetch_daily_note,
         format_game_menu,
         format_help,
         format_login_menu,
@@ -49,14 +53,16 @@ except ImportError:
         format_not_bound,
         format_phone_login_notice,
         format_reminder_usage,
+        get_game_roles,
         game_name,
-        get_hsr_roles,
         get_login_cookie_by_qr,
-        is_train_done,
+        is_daily_done,
+        is_supported_game,
         parse_commission_command,
         parse_reminder_value,
         save_qr_image,
         select_default_role,
+        supported_game_text,
     )
 
 
@@ -134,7 +140,7 @@ class EryouDailyPlugin(Star):
         elif action == "unbind":
             reply = self._unbind(sender_key)
         elif action == "check":
-            reply = await self._check(sender_key)
+            reply = await self._check(sender_key, value)
         else:
             reply = "指令看不懂。发送 /委托帮助 查看用法。"
 
@@ -167,8 +173,8 @@ class EryouDailyPlugin(Star):
         return "我没法主动私聊你。请先私聊机器人发送 /委托绑定，再继续绑定。"
 
     async def _choose_game(self, sender_key: str, game_key: str) -> str:
-        if game_key != GAME_KEY_HSR:
-            return "当前版本先支持：/委托绑定 星铁"
+        if not is_supported_game(game_key):
+            return f"当前支持绑定：{supported_game_text()}。示例：/委托绑定 星铁"
 
         cookie = self.bindings.get_account_cookie(sender_key)
         if not cookie:
@@ -189,7 +195,7 @@ class EryouDailyPlugin(Star):
         cookie = self.bindings.get_account_cookie(sender_key)
         binding = self.bindings.get_game_binding(sender_key, game_key)
         if not cookie or not binding:
-            return "请先绑定星铁账号，再设置提醒：/委托绑定 星铁"
+            return f"请先绑定{game_name(game_key)}账号，再设置提醒：/委托绑定 {game_name(game_key)}"
 
         self.bindings.set_reminder(
             sender_key,
@@ -203,8 +209,8 @@ class EryouDailyPlugin(Star):
     async def _start_qr(self, sender_key: str, game_key: str) -> tuple[str, Path | None]:
         pending = self.bindings.get_pending(sender_key) or {}
         game_key = game_key or pending.get("game") or GAME_KEY_HSR
-        if game_key != GAME_KEY_HSR:
-            return ("当前版本先支持：/委托绑定 星铁", None)
+        if not is_supported_game(game_key):
+            return (f"当前支持绑定：{supported_game_text()}。示例：/委托绑定 星铁", None)
 
         try:
             qr = await asyncio.to_thread(create_qr_login)
@@ -263,11 +269,11 @@ class EryouDailyPlugin(Star):
         return reply
 
     async def _bind_game_from_cookie(self, sender_key: str, game_key: str, cookie: str) -> str:
-        if game_key != GAME_KEY_HSR:
-            return "当前版本先支持星铁每日检查。"
+        if not is_supported_game(game_key):
+            return f"当前支持绑定：{supported_game_text()}。示例：/委托绑定 星铁"
 
         try:
-            roles = await asyncio.to_thread(get_hsr_roles, cookie)
+            roles = await asyncio.to_thread(get_game_roles, cookie, game_key)
         except HsrApiError as exc:
             return f"读取米游社账号失败：{exc}"
         except Exception as exc:
@@ -275,7 +281,7 @@ class EryouDailyPlugin(Star):
 
         role = select_default_role(roles)
         if not role:
-            return "这个米游社账号没有找到崩坏：星穹铁道国服角色。"
+            return f"这个米游社账号没有找到{game_name(game_key)}国服角色。"
 
         self.bindings.set_game_binding(sender_key, game_key, role)
         nickname = role.get("nickname") or "未知角色"
@@ -287,30 +293,56 @@ class EryouDailyPlugin(Star):
             return "已解绑本地米游社账号和游戏绑定。"
         return "你还没有绑定账号。"
 
-    async def _check(self, sender_key: str) -> str:
-        binding = self.bindings.get_game_binding(sender_key, GAME_KEY_HSR)
+    async def _check(self, sender_key: str, game_key: str) -> str:
+        if game_key:
+            return await self._check_one(sender_key, game_key)
+
+        cookie = self.bindings.get_account_cookie(sender_key)
+        bindings = self.bindings.get_game_bindings(sender_key)
+        if not bindings and cookie:
+            bind_reply = await self._bind_game_from_cookie(sender_key, GAME_KEY_HSR, cookie)
+            bindings = self.bindings.get_game_bindings(sender_key)
+            if not bindings:
+                return bind_reply
+
+        if not bindings or not cookie:
+            return format_not_bound()
+
+        replies = []
+        for bound_game_key in bindings:
+            if is_supported_game(bound_game_key):
+                replies.append(await self._check_one(sender_key, bound_game_key))
+
+        return "\n\n".join(replies) if replies else format_not_bound()
+
+    async def _check_one(self, sender_key: str, game_key: str) -> str:
+        if not is_supported_game(game_key):
+            return f"当前支持：{supported_game_text()}。"
+
+        binding = self.bindings.get_game_binding(sender_key, game_key)
         cookie = self.bindings.get_account_cookie(sender_key)
         if not binding and cookie:
-            bind_reply = await self._bind_game_from_cookie(sender_key, GAME_KEY_HSR, cookie)
-            binding = self.bindings.get_game_binding(sender_key, GAME_KEY_HSR)
+            bind_reply = await self._bind_game_from_cookie(sender_key, game_key, cookie)
+            binding = self.bindings.get_game_binding(sender_key, game_key)
             if not binding:
                 return bind_reply
 
         if not binding or not cookie:
-            return format_not_bound()
+            return f"你还没有绑定{game_name(game_key)}。请先发送 /委托绑定 {game_name(game_key)}"
 
         try:
             note = await asyncio.to_thread(
-                fetch_hsr_daily_note,
+                fetch_daily_note,
                 cookie,
                 binding["role"],
+                game_key,
             )
         except HsrApiError as exc:
             return f"查询失败：{exc}"
         except Exception as exc:
             return f"查询失败：{exc}"
 
-        return format_note_status(binding["role"], note)
+        return format_note_status(game_key, binding["role"], note)
 
     async def _reminder_loop(self) -> None:
         while True:
@@ -330,7 +362,7 @@ class EryouDailyPlugin(Star):
             group_id = str(reminder.get("group_id", ""))
             group_umo = reminder.get("group_umo", "")
             reminder_time = reminder.get("time", "")
-            if game_key != GAME_KEY_HSR or not group_id or not group_umo:
+            if not is_supported_game(game_key) or not group_id or not group_umo:
                 continue
             if reminder.get("last_reminded_date") == today:
                 continue
@@ -348,11 +380,11 @@ class EryouDailyPlugin(Star):
                 continue
 
             try:
-                note = await asyncio.to_thread(fetch_hsr_daily_note, cookie, binding["role"])
+                note = await asyncio.to_thread(fetch_daily_note, cookie, binding["role"], game_key)
             except Exception:
                 continue
 
-            if is_train_done(note):
+            if is_daily_done(game_key, note):
                 self.bindings.mark_reminded(sender_key, group_id, game_key, today)
                 continue
 
@@ -361,7 +393,7 @@ class EryouDailyPlugin(Star):
                 MessageChain(
                     [
                         Comp.At(qq=int(sender_key) if sender_key.isdigit() else sender_key),
-                        Comp.Plain(f" {game_name(game_key)}每日实训还没完成，记得清一下。"),
+                        Comp.Plain(f" {game_name(game_key)}{daily_missing_text(game_key)}，记得清一下。"),
                     ]
                 ),
             )
