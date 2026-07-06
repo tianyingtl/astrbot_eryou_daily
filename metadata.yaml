@@ -1,0 +1,9 @@
+name: astrbot_eryou_daily
+desc: 检测崩坏：星穹铁道每日实训和派遣状态
+version: v0.1.0
+author: tianying
+repo: "https://github.com/tianyingtl/astrbot_eryou_daily"
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - qq_official_webhook
