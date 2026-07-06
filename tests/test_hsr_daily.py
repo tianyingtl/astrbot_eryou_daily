@@ -1,6 +1,9 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from hsr_daily import (
+    BindingStore,
     GAME_KEY_GENSHIN,
     GAME_KEY_HSR,
     GAME_KEY_ZZZ,
@@ -90,6 +93,15 @@ class HsrDailyTest(unittest.TestCase):
         self.assertTrue(is_daily_done(GAME_KEY_ZZZ, note))
         self.assertIn("今日活跃：400/400，已完成", text)
         self.assertIn("刮刮卡：已刮", text)
+
+    def test_set_reminder_can_skip_today(self):
+        with TemporaryDirectory() as temp_dir:
+            store = BindingStore(Path(temp_dir) / "bindings.json")
+            store.set_reminder("123", "456", "umo", GAME_KEY_HSR, "00:00", "2026-07-06")
+
+            reminders = store.get_reminders()
+
+        self.assertEqual(reminders[0][1]["last_reminded_date"], "2026-07-06")
 
 
 if __name__ == "__main__":

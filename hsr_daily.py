@@ -119,6 +119,7 @@ class BindingStore:
         group_umo: str,
         game_key: str,
         reminder_time: str,
+        last_reminded_date: str = "",
     ) -> None:
         data = self._load()
         user = data.setdefault("users", {}).setdefault(sender_key, {})
@@ -128,11 +129,12 @@ class BindingStore:
             "group_umo": group_umo,
             "game": game_key,
             "time": reminder_time,
-            "last_reminded_date": "",
+            "last_reminded_date": last_reminded_date,
         }
         for index, reminder in enumerate(reminders):
             if reminder.get("group_id") == str(group_id) and reminder.get("game") == game_key:
-                new_reminder["last_reminded_date"] = reminder.get("last_reminded_date", "")
+                if not last_reminded_date:
+                    new_reminder["last_reminded_date"] = reminder.get("last_reminded_date", "")
                 reminders[index] = new_reminder
                 break
         else:

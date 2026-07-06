@@ -197,14 +197,25 @@ class EryouDailyPlugin(Star):
         if not cookie or not binding:
             return f"请先绑定{game_name(game_key)}账号，再设置提醒：/委托绑定 {game_name(game_key)}"
 
+        now = datetime.now()
+        last_reminded_date = ""
+        note = ""
+        reminder_minutes = _time_to_minutes(reminder_time)
+        current_minutes = now.hour * 60 + now.minute
+        if reminder_minutes is not None and current_minutes >= reminder_minutes:
+            last_reminded_date = now.date().isoformat()
+            note = "今天这个时间已经过了，将从明天开始提醒。"
+
         self.bindings.set_reminder(
             sender_key,
             group_id,
             getattr(event, "unified_msg_origin", ""),
             game_key,
             reminder_time,
+            last_reminded_date,
         )
-        return f"已设置提醒：每天 {reminder_time} 检查{game_name(game_key)}。如果还没完成，会在本群 at 你。"
+        reply = f"已设置提醒：每天 {reminder_time} 检查{game_name(game_key)}。如果还没完成，会在本群 at 你。"
+        return f"{reply}\n{note}" if note else reply
 
     async def _start_qr(self, sender_key: str, game_key: str) -> tuple[str, Path | None]:
         pending = self.bindings.get_pending(sender_key) or {}
