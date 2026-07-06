@@ -3,6 +3,7 @@ import unittest
 from hsr_daily import (
     GAME_KEY_HSR,
     format_game_menu,
+    format_group_bind_guide,
     format_login_menu,
     format_note_status,
     parse_commission_command,
@@ -24,6 +25,7 @@ class HsrDailyTest(unittest.TestCase):
     def test_bind_menus(self):
         self.assertIn("/委托绑定 星铁", format_game_menu())
         self.assertIn("/委托扫码", format_login_menu(GAME_KEY_HSR))
+        self.assertNotIn("/委托扫码", format_group_bind_guide())
 
     def test_format_note_status_clear(self):
         role = {"nickname": "开拓者", "game_uid": "100000000"}

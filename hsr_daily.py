@@ -39,6 +39,8 @@ QR_QUERY_URL = "https://passport-api.miyoushe.com/account/ma-cn-passport/web/que
 APP_VERSION = "2.71.1"
 QR_APP_ID = "bll8iq97cem8"
 DS_SALT = "xV8v4Qu54lUKrEYFZkJhB8cuOh9Asafs"
+DEVICE_ID = "AFA5DBD7-D027-402B-9522-1D9A4A5EFB85"
+DEVICE_FP = "38d7f349e93d8"
 TIMEOUT_SECONDS = 8
 
 
@@ -183,11 +185,8 @@ def format_group_bind_guide() -> str:
     return "\n".join(
         [
             "账号绑定需要私聊完成，不能在群里绑定。",
-            "请私聊机器人发送：",
-            "1. /委托绑定",
-            "2. /委托绑定 星铁",
-            "3. /委托扫码",
-            "4. 用米游社 App 扫码确认后发送 /委托确认",
+            "请私聊机器人发送 /委托绑定。",
+            "私聊里会先让你选游戏，再让你选择扫码或手机号登录。",
         ]
     )
 
@@ -346,7 +345,7 @@ def format_note_status(role: dict[str, Any], note: dict[str, Any]) -> str:
 
 def _api_get(url: str, cookie: str, params: dict[str, Any], with_ds: bool) -> dict[str, Any]:
     cookie = _normalize_cookie(cookie)
-    query = urlencode(params)
+    query = urlencode(sorted(params.items()))
     request_url = f"{url}?{query}" if query else url
     headers = _headers(cookie, query if with_ds else "")
     request = Request(request_url, headers=headers, method="GET")
@@ -383,11 +382,17 @@ def _headers(cookie: str, query: str) -> dict[str, str]:
         "Accept": "application/json, text/plain, */*",
         "Cookie": cookie,
         "Origin": "https://webstatic.mihoyo.com",
-        "Referer": "https://webstatic.mihoyo.com/",
+        "Referer": "https://webstatic.mihoyo.com/app/community-game-records/index.html?v=6",
         "User-Agent": f"Mozilla/5.0 miHoYoBBS/{APP_VERSION}",
+        "X-Requested-With": "com.mihoyo.hyperion",
         "x-rpc-app_version": APP_VERSION,
         "x-rpc-client_type": "5",
+        "x-rpc-device_fp": DEVICE_FP,
+        "x-rpc-device_id": DEVICE_ID,
+        "x-rpc-device_model": "iPhone14,3",
+        "x-rpc-device_name": "iPhone",
         "x-rpc-language": "zh-cn",
+        "x-rpc-sys_version": "17.3.1",
     }
     if query:
         headers["DS"] = _make_ds(query)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import re
 from pathlib import Path
 from time import time
@@ -16,7 +17,6 @@ try:
         create_qr_login,
         fetch_hsr_daily_note,
         format_game_menu,
-        format_group_bind_guide,
         format_help,
         format_login_menu,
         format_note_status,
@@ -37,7 +37,6 @@ except ImportError:
         create_qr_login,
         fetch_hsr_daily_note,
         format_game_menu,
-        format_group_bind_guide,
         format_help,
         format_login_menu,
         format_note_status,
@@ -74,25 +73,37 @@ class EryouDailyPlugin(Star):
         if action == "help":
             reply = format_help()
         elif action == "bind_game_menu":
-            reply = self._private_only(event) or format_game_menu()
+            reply = await self._private_reply(event, sender_key, format_game_menu())
         elif action == "bind_game":
-            reply = self._private_only(event) or await self._choose_game(sender_key, value)
+            reply = await self._private_reply(
+                event,
+                sender_key,
+                await self._choose_game(sender_key, value),
+            )
         elif action == "qr":
-            block = self._private_only(event)
-            if block:
-                yield event.plain_result(block)
-                event.stop_event()
-                return
-            reply, image_path = await self._start_qr(sender_key, value)
-            yield event.plain_result(reply)
-            if image_path:
-                yield event.image_result(str(image_path))
+            text, image_path = await self._start_qr(sender_key, value)
+            if _is_private_event(event):
+                yield event.plain_result(text)
+                if image_path:
+                    yield event.image_result(str(image_path))
+            else:
+                yield event.plain_result(
+                    await self._private_reply(event, sender_key, text, image_path)
+                )
             event.stop_event()
             return
         elif action == "confirm":
-            reply = self._private_only(event) or await self._confirm_qr(sender_key)
+            reply = await self._private_reply(
+                event,
+                sender_key,
+                await self._confirm_qr(sender_key),
+            )
         elif action == "phone":
-            reply = self._private_only(event) or format_phone_login_notice()
+            reply = await self._private_reply(
+                event,
+                sender_key,
+                format_phone_login_notice(),
+            )
         elif action == "unbind":
             reply = self._unbind(sender_key)
         elif action == "check":
@@ -102,6 +113,23 @@ class EryouDailyPlugin(Star):
 
         yield event.plain_result(reply)
         event.stop_event()
+
+    async def _private_reply(
+        self,
+        event: AstrMessageEvent,
+        sender_key: str,
+        text: str,
+        image_path: Path | None = None,
+    ) -> str:
+        if _is_private_event(event):
+            return text
+
+        sent = await _send_private_onebot(event, sender_key, text, image_path)
+        if sent and image_path:
+            return "二维码已经私聊发送给你了，请去私聊窗口扫码确认。"
+        if sent:
+            return "绑定说明已经私聊发送给你了，请去私聊窗口继续操作。"
+        return "我没法主动私聊你。请先私聊机器人发送 /委托绑定，再继续绑定。"
 
     async def _choose_game(self, sender_key: str, game_key: str) -> str:
         if game_key != GAME_KEY_HSR:
@@ -153,7 +181,7 @@ class EryouDailyPlugin(Star):
     async def _confirm_qr(self, sender_key: str) -> str:
         pending = self.bindings.get_pending(sender_key)
         if not pending or not pending.get("ticket"):
-            return "没有进行中的扫码登录。请先私聊发送 /委托绑定 星铁，然后选择 /委托扫码。"
+            return "没有进行中的扫码登录。请先发送 /委托绑定 星铁，然后选择 /委托扫码。"
 
         try:
             cookie = await asyncio.to_thread(
@@ -226,10 +254,51 @@ class EryouDailyPlugin(Star):
 
         return format_note_status(binding["role"], note)
 
-    def _private_only(self, event: AstrMessageEvent) -> str:
-        if _is_private_event(event):
-            return ""
-        return format_group_bind_guide()
+
+async def _send_private_onebot(
+    event: AstrMessageEvent,
+    sender_key: str,
+    text: str,
+    image_path: Path | None = None,
+) -> bool:
+    if not sender_key.isdigit():
+        return False
+
+    bot = getattr(event, "bot", None)
+    if not bot:
+        return False
+
+    messages = [{"type": "text", "data": {"text": text}}]
+    if image_path:
+        with image_path.open("rb") as image_file:
+            encoded = base64.b64encode(image_file.read()).decode("ascii")
+        messages.append({"type": "image", "data": {"file": f"base64://{encoded}"}})
+
+    payload = {"user_id": int(sender_key), "message": messages}
+    self_id = _get_self_id(event)
+    if self_id:
+        payload["self_id"] = self_id
+
+    try:
+        send_private = getattr(bot, "send_private_msg", None)
+        if callable(send_private):
+            await send_private(**payload)
+            return True
+
+        call_action = getattr(bot, "call_action", None)
+        if callable(call_action):
+            await call_action("send_private_msg", **payload)
+            return True
+
+        api = getattr(bot, "api", None)
+        api_call_action = getattr(api, "call_action", None)
+        if callable(api_call_action):
+            await api_call_action("send_private_msg", **payload)
+            return True
+    except Exception:
+        return False
+
+    return False
 
 
 def _get_sender_key(event: AstrMessageEvent) -> str:
@@ -255,7 +324,23 @@ def _get_sender_key(event: AstrMessageEvent) -> str:
     return str(origin) if origin else ""
 
 
+def _get_self_id(event: AstrMessageEvent) -> int | str | None:
+    message_obj = getattr(event, "message_obj", None)
+    value = getattr(message_obj, "self_id", None)
+    if value:
+        return value
+
+    raw = getattr(message_obj, "raw_message", None)
+    if isinstance(raw, dict):
+        return raw.get("self_id")
+    return None
+
+
 def _is_private_event(event: AstrMessageEvent) -> bool:
+    getter = getattr(event, "get_group_id", None)
+    if callable(getter):
+        return not bool(getter())
+
     message_obj = getattr(event, "message_obj", None)
     if message_obj is None:
         return False
