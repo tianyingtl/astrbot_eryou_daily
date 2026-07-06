@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import re
+from contextlib import suppress
+from datetime import datetime
 from pathlib import Path
 from time import time
 
-from astrbot.api.event import AstrMessageEvent, filter
+import astrbot.api.message_components as Comp
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star
 
 try:
@@ -22,10 +25,13 @@ try:
         format_note_status,
         format_not_bound,
         format_phone_login_notice,
+        format_reminder_usage,
         game_name,
         get_hsr_roles,
         get_login_cookie_by_qr,
+        is_train_done,
         parse_commission_command,
+        parse_reminder_value,
         save_qr_image,
         select_default_role,
     )
@@ -42,30 +48,49 @@ except ImportError:
         format_note_status,
         format_not_bound,
         format_phone_login_notice,
+        format_reminder_usage,
         game_name,
         get_hsr_roles,
         get_login_cookie_by_qr,
+        is_train_done,
         parse_commission_command,
+        parse_reminder_value,
         save_qr_image,
         select_default_role,
     )
 
 
 class EryouDailyPlugin(Star):
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config=None):
         super().__init__(context)
+        self.config = config or {}
         data_path = Path(__file__).resolve().parent / "data" / "bindings.json"
         self.bindings = BindingStore(data_path)
+        self._reminder_task = None
+        self._ensure_reminder_task()
+
+    async def terminate(self) -> None:
+        if self._reminder_task:
+            self._reminder_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._reminder_task
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         command = parse_commission_command(getattr(event, "message_str", ""))
         if command is None:
             return
+        self._ensure_reminder_task()
 
         sender_key = _get_sender_key(event)
         if not sender_key:
             yield event.plain_result("无法识别发送者，不能查询或绑定账号。")
+            event.stop_event()
+            return
+
+        allowed, reason = self._group_allowed_event(event)
+        if not allowed:
+            yield event.plain_result(reason)
             event.stop_event()
             return
 
@@ -104,6 +129,8 @@ class EryouDailyPlugin(Star):
                 sender_key,
                 format_phone_login_notice(),
             )
+        elif action == "reminder_set":
+            reply = await self._set_reminder(event, sender_key, value)
         elif action == "unbind":
             reply = self._unbind(sender_key)
         elif action == "check":
@@ -113,6 +140,14 @@ class EryouDailyPlugin(Star):
 
         yield event.plain_result(reply)
         event.stop_event()
+
+    def _ensure_reminder_task(self) -> None:
+        if self._reminder_task and not self._reminder_task.done():
+            return
+        try:
+            self._reminder_task = asyncio.create_task(self._reminder_loop())
+        except RuntimeError:
+            self._reminder_task = None
 
     async def _private_reply(
         self,
@@ -141,6 +176,29 @@ class EryouDailyPlugin(Star):
             return format_login_menu(game_key)
 
         return await self._bind_game_from_cookie(sender_key, game_key, cookie)
+
+    async def _set_reminder(self, event: AstrMessageEvent, sender_key: str, value: str) -> str:
+        group_id = _get_group_id(event)
+        if not group_id:
+            return "提醒需要在群里设置，这样到点才能在当前群里 at 你。\n" + format_reminder_usage()
+
+        game_key, reminder_time, error = parse_reminder_value(value)
+        if error:
+            return error
+
+        cookie = self.bindings.get_account_cookie(sender_key)
+        binding = self.bindings.get_game_binding(sender_key, game_key)
+        if not cookie or not binding:
+            return "请先绑定星铁账号，再设置提醒：/委托绑定 星铁"
+
+        self.bindings.set_reminder(
+            sender_key,
+            group_id,
+            getattr(event, "unified_msg_origin", ""),
+            game_key,
+            reminder_time,
+        )
+        return f"已设置提醒：每天 {reminder_time} 检查{game_name(game_key)}。如果还没完成，会在本群 at 你。"
 
     async def _start_qr(self, sender_key: str, game_key: str) -> tuple[str, Path | None]:
         pending = self.bindings.get_pending(sender_key) or {}
@@ -254,6 +312,81 @@ class EryouDailyPlugin(Star):
 
         return format_note_status(binding["role"], note)
 
+    async def _reminder_loop(self) -> None:
+        while True:
+            try:
+                await self._run_due_reminders()
+            except Exception:
+                pass
+            await asyncio.sleep(60)
+
+    async def _run_due_reminders(self) -> None:
+        now = datetime.now()
+        today = now.date().isoformat()
+        current_minutes = now.hour * 60 + now.minute
+
+        for sender_key, reminder in self.bindings.get_reminders():
+            game_key = reminder.get("game")
+            group_id = str(reminder.get("group_id", ""))
+            group_umo = reminder.get("group_umo", "")
+            reminder_time = reminder.get("time", "")
+            if game_key != GAME_KEY_HSR or not group_id or not group_umo:
+                continue
+            if reminder.get("last_reminded_date") == today:
+                continue
+            if not self._group_allowed_by_id(group_id)[0]:
+                continue
+
+            due_minutes = _time_to_minutes(reminder_time)
+            if due_minutes is None or current_minutes < due_minutes:
+                continue
+
+            cookie = self.bindings.get_account_cookie(sender_key)
+            binding = self.bindings.get_game_binding(sender_key, game_key)
+            if not cookie or not binding:
+                self.bindings.mark_reminded(sender_key, group_id, game_key, today)
+                continue
+
+            try:
+                note = await asyncio.to_thread(fetch_hsr_daily_note, cookie, binding["role"])
+            except Exception:
+                continue
+
+            if is_train_done(note):
+                self.bindings.mark_reminded(sender_key, group_id, game_key, today)
+                continue
+
+            await self.context.send_message(
+                group_umo,
+                MessageChain(
+                    [
+                        Comp.At(qq=int(sender_key) if sender_key.isdigit() else sender_key),
+                        Comp.Plain(f" {game_name(game_key)}每日实训还没完成，记得清一下。"),
+                    ]
+                ),
+            )
+            self.bindings.mark_reminded(sender_key, group_id, game_key, today)
+
+    def _group_allowed_event(self, event: AstrMessageEvent) -> tuple[bool, str]:
+        group_id = _get_group_id(event)
+        if not group_id:
+            return True, ""
+        return self._group_allowed_by_id(group_id)
+
+    def _group_allowed_by_id(self, group_id: str) -> tuple[bool, str]:
+        group_id = str(group_id)
+        mode = str(_config_get(self.config, "group_filter_mode", "off")).lower()
+        whitelist = _normalize_group_list(_config_get(self.config, "whitelist_groups", []))
+        blacklist = _normalize_group_list(_config_get(self.config, "blacklist_groups", []))
+
+        if mode in {"off", "关闭", "none", ""}:
+            return True, ""
+        if mode in {"whitelist", "white", "白名单"} and group_id not in whitelist:
+            return False, "本群未加入 /委托 插件白名单。"
+        if mode in {"blacklist", "black", "黑名单"} and group_id in blacklist:
+            return False, "本群已被加入 /委托 插件黑名单。"
+        return True, ""
+
 
 async def _send_private_onebot(
     event: AstrMessageEvent,
@@ -324,6 +457,18 @@ def _get_sender_key(event: AstrMessageEvent) -> str:
     return str(origin) if origin else ""
 
 
+def _get_group_id(event: AstrMessageEvent) -> str:
+    getter = getattr(event, "get_group_id", None)
+    if callable(getter):
+        group_id = getter()
+        if group_id:
+            return str(group_id)
+
+    message_obj = getattr(event, "message_obj", None)
+    group_id = getattr(message_obj, "group_id", "")
+    return str(group_id) if group_id else ""
+
+
 def _get_self_id(event: AstrMessageEvent) -> int | str | None:
     message_obj = getattr(event, "message_obj", None)
     value = getattr(message_obj, "self_id", None)
@@ -337,16 +482,35 @@ def _get_self_id(event: AstrMessageEvent) -> int | str | None:
 
 
 def _is_private_event(event: AstrMessageEvent) -> bool:
-    getter = getattr(event, "get_group_id", None)
-    if callable(getter):
-        return not bool(getter())
-
-    message_obj = getattr(event, "message_obj", None)
-    if message_obj is None:
-        return False
-    group_id = getattr(message_obj, "group_id", "")
-    return not group_id
+    return not bool(_get_group_id(event))
 
 
 def _safe_key(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]", "_", value)
+
+
+def _time_to_minutes(value: str) -> int | None:
+    match = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", str(value or ""))
+    if not match:
+        return None
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def _config_get(config, key: str, default):
+    getter = getattr(config, "get", None)
+    if callable(getter):
+        return getter(key, default)
+    try:
+        return config[key]
+    except Exception:
+        return default
+
+
+def _normalize_group_list(value) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        items = re.split(r"[\s,，;；]+", value)
+    else:
+        items = value
+    return {str(item).strip() for item in items if str(item).strip()}

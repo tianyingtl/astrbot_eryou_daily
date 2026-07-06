@@ -72,6 +72,56 @@ class BindingStore:
         user.setdefault("games", {})[game_key] = {"role": role}
         self._save(data)
 
+    def get_reminders(self) -> list[tuple[str, dict[str, Any]]]:
+        data = self._load()
+        reminders = []
+        for sender_key, user in data.get("users", {}).items():
+            for reminder in user.get("reminders", []):
+                reminders.append((sender_key, reminder))
+        return reminders
+
+    def set_reminder(
+        self,
+        sender_key: str,
+        group_id: str,
+        group_umo: str,
+        game_key: str,
+        reminder_time: str,
+    ) -> None:
+        data = self._load()
+        user = data.setdefault("users", {}).setdefault(sender_key, {})
+        reminders = user.setdefault("reminders", [])
+        new_reminder = {
+            "group_id": str(group_id),
+            "group_umo": group_umo,
+            "game": game_key,
+            "time": reminder_time,
+            "last_reminded_date": "",
+        }
+        for index, reminder in enumerate(reminders):
+            if reminder.get("group_id") == str(group_id) and reminder.get("game") == game_key:
+                new_reminder["last_reminded_date"] = reminder.get("last_reminded_date", "")
+                reminders[index] = new_reminder
+                break
+        else:
+            reminders.append(new_reminder)
+        self._save(data)
+
+    def mark_reminded(
+        self,
+        sender_key: str,
+        group_id: str,
+        game_key: str,
+        reminder_date: str,
+    ) -> None:
+        data = self._load()
+        reminders = data.setdefault("users", {}).setdefault(sender_key, {}).setdefault("reminders", [])
+        for reminder in reminders:
+            if reminder.get("group_id") == str(group_id) and reminder.get("game") == game_key:
+                reminder["last_reminded_date"] = reminder_date
+                break
+        self._save(data)
+
     def delete_user(self, sender_key: str) -> bool:
         data = self._load()
         existed = False
@@ -139,6 +189,8 @@ def parse_commission_command(message: str) -> tuple[str, str] | None:
             return ("check", GAME_KEY_HSR)
         if rest.lower() == "help" or rest == "帮助":
             return ("help", "")
+        if rest.startswith("设置"):
+            return ("reminder_set", rest[len("设置"):].strip())
         if rest == "绑定":
             return ("bind_game_menu", "")
         if rest.startswith("绑定"):
@@ -158,6 +210,24 @@ def parse_commission_command(message: str) -> tuple[str, str] | None:
     return None
 
 
+def parse_reminder_value(value: str) -> tuple[str | None, str | None, str | None]:
+    parts = (value or "").split()
+    if len(parts) != 2:
+        return None, None, format_reminder_usage()
+
+    game_key = resolve_game_key(parts[0])
+    if not game_key:
+        return None, None, "暂时只支持星铁。正确格式：/委托设置 星铁 20:00"
+
+    match = re.fullmatch(r"([01]?\d|2[0-3])[:：]([0-5]\d)", parts[1])
+    if not match:
+        return None, None, format_reminder_usage()
+
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    return game_key, f"{hour:02d}:{minute:02d}", None
+
+
 def resolve_game_key(text: str) -> str | None:
     normalized = re.sub(r"[\s:：_-]+", "", (text or "").lower())
     return GAME_ALIASES.get(normalized)
@@ -171,11 +241,12 @@ def format_help() -> str:
     return "\n".join(
         [
             "二游每日检查：",
-            "/委托：检查崩坏：星穹铁道今日每日实训和派遣",
+            "/委托：检查崩坏：星穹铁道今日每日实训",
             "/委托绑定：选择要绑定的游戏",
             "/委托绑定 星铁：直接选择崩坏：星穹铁道",
             "/委托扫码：使用米游社 App 扫码登录",
             "/委托确认：扫码确认后完成绑定",
+            "/委托设置 星铁 20:00：到点未完成时在本群提醒你",
             "/委托解绑：删除本地绑定",
         ]
     )
@@ -184,9 +255,8 @@ def format_help() -> str:
 def format_group_bind_guide() -> str:
     return "\n".join(
         [
-            "账号绑定需要私聊完成，不能在群里绑定。",
-            "请私聊机器人发送 /委托绑定。",
-            "私聊里会先让你选游戏，再让你选择扫码或手机号登录。",
+            "绑定说明已经私聊发送给你了。",
+            "如果没有收到，请先私聊机器人发送 /委托绑定。",
         ]
     )
 
@@ -228,6 +298,16 @@ def format_not_bound() -> str:
         [
             "你还没有绑定星铁。",
             "请私聊机器人发送 /委托绑定，然后按提示选择 星铁 -> 扫码 -> 确认。",
+        ]
+    )
+
+
+def format_reminder_usage() -> str:
+    return "\n".join(
+        [
+            "格式不对。正确格式：/委托设置 游戏名 时间",
+            "示例：/委托设置 星铁 20:00",
+            "时间格式：24小时制 HH:MM，例如 08:30、20:00。",
         ]
     )
 
@@ -311,36 +391,26 @@ def format_note_status(role: dict[str, Any], note: dict[str, Any]) -> str:
 
     current_train = _first_int(note, "current_train_score")
     max_train = _first_int(note, "max_train_score") or 500
-    train_done = current_train is not None and current_train >= max_train
-
-    accepted = _first_int(note, "accepted_expedition_num", "accepted_epedition_num")
-    total = _first_int(note, "total_expedition_num", "total_epedition_num")
-    expeditions = note.get("expeditions") or []
-    if total is None:
-        total = len(expeditions)
-    if accepted is None:
-        accepted = _count_started_expeditions(expeditions)
-    idle = max(total - accepted, 0)
-    finished = _count_finished_expeditions(expeditions)
+    train_done = is_train_done(note)
 
     lines = [
         "星铁今日委托检查",
         f"账号：{nickname}（UID {uid}）",
         f"每日实训：{_score_text(current_train)}/{max_train}，{'已完成' if train_done else '未完成'}",
-        f"派遣：{accepted}/{total}，{_format_expedition_status(idle, finished)}",
     ]
 
-    if train_done and idle == 0:
+    if train_done:
         lines.append("今天的每日已经 Clear。")
     else:
-        misses = []
-        if not train_done:
-            misses.append("每日实训还没满")
-        if idle:
-            misses.append(f"还有 {idle} 个派遣空位")
-        lines.append("还没 Clear：" + "；".join(misses))
+        lines.append("还没 Clear：每日实训还没满。")
 
     return "\n".join(lines)
+
+
+def is_train_done(note: dict[str, Any]) -> bool:
+    current_train = _first_int(note, "current_train_score")
+    max_train = _first_int(note, "max_train_score") or 500
+    return current_train is not None and current_train >= max_train
 
 
 def _api_get(url: str, cookie: str, params: dict[str, Any], with_ds: bool) -> dict[str, Any]:
@@ -467,20 +537,3 @@ def _first_int(data: dict[str, Any], *keys: str) -> int | None:
 
 def _score_text(value: int | None) -> str:
     return "未知" if value is None else str(value)
-
-
-def _count_started_expeditions(expeditions: list[dict[str, Any]]) -> int:
-    idle_statuses = {"", "None", "Idle", "NotStart", "NotStarted"}
-    return sum(1 for item in expeditions if str(item.get("status", "")) not in idle_statuses)
-
-
-def _count_finished_expeditions(expeditions: list[dict[str, Any]]) -> int:
-    return sum(1 for item in expeditions if int(item.get("remaining_time") or 0) <= 0)
-
-
-def _format_expedition_status(idle: int, finished: int) -> str:
-    if idle:
-        return f"未全部派出，{idle} 个空位"
-    if finished:
-        return f"已全部派出，{finished} 个可领取"
-    return "已全部派出"

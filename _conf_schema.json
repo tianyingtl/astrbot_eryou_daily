@@ -1,0 +1,25 @@
+{
+  "group_filter_mode": {
+    "description": "群过滤模式",
+    "type": "string",
+    "default": "关闭",
+    "options": [
+      "关闭",
+      "白名单",
+      "黑名单"
+    ],
+    "hint": "关闭=所有群都可用；白名单=只允许白名单群使用；黑名单=禁止黑名单群使用。"
+  },
+  "whitelist_groups": {
+    "description": "白名单群号",
+    "type": "list",
+    "default": [],
+    "hint": "仅 group_filter_mode 为 whitelist 时生效。每一项填写一个群号。"
+  },
+  "blacklist_groups": {
+    "description": "黑名单群号",
+    "type": "list",
+    "default": [],
+    "hint": "仅 group_filter_mode 为 blacklist 时生效。每一项填写一个群号。"
+  }
+}
