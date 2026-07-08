@@ -4,6 +4,7 @@ import hashlib
 import json
 import random
 import re
+import shutil
 import time
 import uuid
 from base64 import b64encode
@@ -264,6 +265,17 @@ class BindingStore:
             json.dump(data, file, ensure_ascii=False, indent=2)
 
 
+def resolve_binding_path(plugin_dir: Path, home_dir: Path | None = None) -> Path:
+    old_path = plugin_dir / "data" / "bindings.json"
+    home = Path(home_dir) if home_dir is not None else Path.home()
+    new_path = home / ".astrbot_eryou_daily" / "bindings.json"
+
+    if old_path.exists() and not new_path.exists():
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(old_path, new_path)
+    return new_path
+
+
 def parse_commission_command(message: str) -> tuple[str, str] | None:
     text = (message or "").strip()
     for prefix in ("/委托", "／委托"):
@@ -283,7 +295,10 @@ def parse_commission_command(message: str) -> tuple[str, str] | None:
             return ("bind_game_menu", "")
         if rest.startswith("绑定"):
             game_text = rest[len("绑定"):].strip()
-            game_key = resolve_game_key(game_text)
+            game_parts = game_text.split()
+            game_key = resolve_game_key(game_parts[0] if game_parts else game_text)
+            if game_key == GAME_KEY_NTE and len(game_parts) >= 2 and game_parts[1].isdigit():
+                return ("bind_game", f"{game_key}:{game_parts[1]}")
             return ("bind_game", game_key or game_text)
         if rest.startswith("扫码"):
             game_text = rest[len("扫码"):].strip()
@@ -357,6 +372,7 @@ def format_help() -> str:
             "/委托绑定：选择要绑定的游戏",
             "/委托绑定 星铁/原神/绝区零：直接发送米游社登录二维码",
             "/委托绑定 异环：使用塔吉多手机号短信登录",
+            "/委托绑定 异环 UID：绑定指定异环角色",
             "/委托发码 手机号：异环发送短信验证码",
             "/委托扫码：二维码过期时重新生成",
             "/委托确认：米游社扫码确认后完成绑定",
@@ -384,9 +400,10 @@ def format_game_menu() -> str:
             "/委托绑定 原神",
             "/委托绑定 绝区零",
             "/委托绑定 异环",
+            "/委托绑定 异环 UID",
             "",
             "米家游戏会私聊米游社登录二维码。",
-            "异环会走塔吉多手机号短信登录，请按私聊提示发码和确认。",
+            "异环会走塔吉多手机号短信登录；有多个角色时请带 UID。",
         ]
     )
 
@@ -398,7 +415,8 @@ def format_nte_bind_guide() -> str:
             "请在私聊里发送：/委托发码 手机号",
             "收到短信验证码后发送：/委托确认 验证码",
             "示例：/委托发码 13800138000",
-            "说明：手机号和验证码只用于本次登录，插件会保存塔吉多 token 到本地 data/ 目录。",
+            "如果有多个角色，可以先在群里发送：/委托绑定 异环 UID",
+            "说明：手机号和验证码只用于本次登录，插件会保存塔吉多 token 到用户目录下的 .astrbot_eryou_daily。",
         ]
     )
 
@@ -477,11 +495,20 @@ def send_nte_sms_code(mobile: str, device_id: str) -> None:
     _laohu_submit("/m/newApi/sendPhoneCaptchaWithOutLogin", params)
 
 
-def bind_nte_by_sms(mobile: str, code: str, device_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def login_nte_by_sms(mobile: str, code: str, device_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     laohu = _laohu_login_by_sms(mobile, code, device_id)
     account = _tajiduo_user_center_login(laohu["token"], laohu["user_id"], device_id)
-    account, roles = get_nte_roles(account)
-    role = select_default_role(roles)
+    return get_nte_roles(account)
+
+
+def bind_nte_by_sms(
+    mobile: str,
+    code: str,
+    device_id: str,
+    target_uid: str = "",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    account, roles = login_nte_by_sms(mobile, code, device_id)
+    role = select_nte_role(roles, target_uid)
     if not role:
         raise HsrApiError("这个塔吉多账号没有找到异环角色。")
     return account, role
@@ -530,7 +557,7 @@ def fetch_nte_daily_note(
     note = _tajiduo_request(
         account,
         "/apihub/awapi/yh/roleHome",
-        query={"roleId": str(role_id)},
+        query={"roleId": str(role_id), "_t": int(time.time())},
     )
     if not isinstance(note, dict):
         raise HsrApiError("异环接口返回格式异常。")
@@ -600,6 +627,38 @@ def select_default_role(roles: list[dict[str, Any]]) -> dict[str, Any] | None:
     }
 
 
+def select_nte_role(roles: list[dict[str, Any]], target_uid: str = "") -> dict[str, Any] | None:
+    if not roles:
+        return None
+
+    target_uid = str(target_uid or "").strip()
+    if target_uid:
+        for role in roles:
+            role_uid = str(role.get("game_uid") or role.get("uid") or "")
+            if role_uid == target_uid:
+                return select_default_role([role])
+        raise HsrApiError(
+            f"没有找到 UID {target_uid} 的异环角色。可用角色：{_role_list_text(roles)}"
+        )
+
+    if len(roles) == 1:
+        return select_default_role(roles)
+
+    raise HsrApiError(
+        "这个塔吉多账号下有多个异环角色，请用 /委托绑定 异环 UID 指定。"
+        f"可用角色：{_role_list_text(roles)}"
+    )
+
+
+def _role_list_text(roles: list[dict[str, Any]]) -> str:
+    items = []
+    for role in roles:
+        nickname = role.get("nickname") or "未知角色"
+        uid = role.get("game_uid") or role.get("uid") or "未知 UID"
+        items.append(f"{nickname}（UID {uid}）")
+    return "、".join(items) if items else "无"
+
+
 def fetch_hsr_daily_note(cookie: str, role: dict[str, Any]) -> dict[str, Any]:
     return fetch_daily_note(cookie, role, GAME_KEY_HSR)
 
@@ -639,7 +698,7 @@ def is_daily_done(game_key: str, note: dict[str, Any]) -> bool:
 
 def daily_missing_text(game_key: str) -> str:
     if game_key == GAME_KEY_NTE:
-        return "今日活跃还没完成"
+        return "活跃度还没到 100"
     if game_key == GAME_KEY_GENSHIN:
         return "每日委托还没完成或奖励未领取"
     if game_key == GAME_KEY_ZZZ:
@@ -659,7 +718,7 @@ def _format_hsr_status(role: dict[str, Any], note: dict[str, Any]) -> str:
     train_done = is_train_done(note)
 
     lines = [
-        "星铁今日委托检查",
+        "娜娜米提醒：星铁今日委托检查",
         f"账号：{nickname}（UID {uid}）",
         f"开拓力：{_score_text(current_stamina)}/{max_stamina}",
         f"每日实训：{_score_text(current_train)}/{max_train}，{'已完成' if train_done else '未完成'}",
@@ -668,9 +727,9 @@ def _format_hsr_status(role: dict[str, Any], note: dict[str, Any]) -> str:
         lines.append(f"后备开拓力：{reserve_stamina}")
 
     if train_done:
-        lines.append("今天的每日已经 Clear。")
+        lines.append("今天这关已经通过了，可以稍微休息一下。")
     else:
-        lines.append("还没 Clear：每日实训还没满。")
+        lines.append("今天这关还没过：每日实训还没满，先补一下比较稳。")
 
     return "\n".join(lines)
 
@@ -687,7 +746,7 @@ def _format_genshin_status(role: dict[str, Any], note: dict[str, Any]) -> str:
     done = is_genshin_done(note)
 
     lines = [
-        "原神今日委托检查",
+        "娜娜米提醒：原神今日委托检查",
         f"账号：{nickname}（UID {uid}）",
         f"原粹树脂：{_score_text(current_resin)}/{max_resin}",
         f"每日委托：{_score_text(current)}/{max_count}，{'已完成' if current is not None and current >= max_count else '未完成'}",
@@ -695,14 +754,14 @@ def _format_genshin_status(role: dict[str, Any], note: dict[str, Any]) -> str:
     ]
 
     if done:
-        lines.append("今天的每日已经 Clear。")
+        lines.append("今天这关已经通过了，可以稍微休息一下。")
     else:
         misses = []
         if current is None or current < max_count:
             misses.append("每日委托还没满")
         if not reward_received:
             misses.append("凯瑟琳奖励未领取")
-        lines.append("还没 Clear：" + "；".join(misses) + "。")
+        lines.append("今天这关还没过：" + "；".join(misses) + "。先补一下比较稳。")
 
     return "\n".join(lines)
 
@@ -717,7 +776,7 @@ def _format_zzz_status(role: dict[str, Any], note: dict[str, Any]) -> str:
     done = is_zzz_done(note)
 
     lines = [
-        "绝区零今日委托检查",
+        "娜娜米提醒：绝区零今日委托检查",
         f"账号：{nickname}（UID {uid}）",
         f"电量：{_score_text(energy_current)}/{energy_max}",
         f"今日活跃：{_score_text(current)}/{max_count}，{'已完成' if done else '未完成'}",
@@ -726,16 +785,18 @@ def _format_zzz_status(role: dict[str, Any], note: dict[str, Any]) -> str:
         lines.append(f"刮刮卡：{card_sign}")
 
     if done:
-        lines.append("今天的每日已经 Clear。")
+        lines.append("今天这关已经通过了，可以稍微休息一下。")
     else:
-        lines.append("还没 Clear：今日活跃还没满。")
+        lines.append("今天这关还没过：今日活跃还没满，先补一下比较稳。")
 
     return "\n".join(lines)
 
 
 def _format_nte_status(role: dict[str, Any], note: dict[str, Any]) -> str:
-    nickname = note.get("rolename") or role.get("nickname") or "未知角色"
-    uid = note.get("roleid") or role.get("game_uid") or role.get("uid") or "未知 UID"
+    bound_name = role.get("nickname") or "未知角色"
+    bound_uid = str(role.get("game_uid") or role.get("uid") or "未知 UID")
+    nickname = note.get("rolename") or bound_name
+    uid = str(note.get("roleid") or bound_uid)
 
     stamina = _first_int(note, "staminaValue")
     max_stamina = _first_int(note, "staminaMaxValue") or 240
@@ -745,17 +806,22 @@ def _format_nte_status(role: dict[str, Any], note: dict[str, Any]) -> str:
     done = is_nte_done(note)
 
     lines = [
-        "异环今日委托检查",
-        f"账号：{nickname}（UID {uid}）",
+        "娜娜米提醒：异环今日委托检查",
+        f"绑定角色：{bound_name}（UID {bound_uid}）",
+    ]
+    if uid != bound_uid:
+        lines.append(f"接口返回角色：{nickname}（UID {uid}），和绑定 UID 不一致，请重新绑定指定 UID。")
+
+    lines.extend([
         f"本性像素：{_score_text(stamina)}/{max_stamina}",
         f"都市活力：{_score_text(city_stamina)}/{max_city_stamina}",
-        f"今日活跃：{_score_text(day_value)}/100，{'已完成' if done else '未完成'}",
-    ]
+        f"活跃度：{_score_text(day_value)}/100，{'已完成' if done else '未完成'}",
+    ])
 
     if done:
-        lines.append("今天的每日已经 Clear。")
+        lines.append("今天这关已经通过了，可以稍微休息一下。")
     else:
-        lines.append("还没 Clear：今日活跃还没满。")
+        lines.append("今天这关还没过：活跃度还没到 100，先补一下比较稳。")
 
     return "\n".join(lines)
 
@@ -780,6 +846,20 @@ def is_zzz_done(note: dict[str, Any]) -> bool:
 def is_nte_done(note: dict[str, Any]) -> bool:
     day_value = _first_int(note, "dayvalue")
     return day_value is not None and day_value >= 100
+
+
+def nte_reminder_reasons(note: dict[str, Any], check_city_stamina: bool = False) -> list[str]:
+    reasons = []
+    day_value = _first_int(note, "dayvalue")
+    if day_value is None or day_value < 100:
+        reasons.append(f"活跃度还没到 100（当前 {_score_text(day_value)}/100）")
+
+    if check_city_stamina:
+        city_stamina = _first_int(note, "citystaminaValue")
+        max_city_stamina = _first_int(note, "citystaminaMaxValue") or 100
+        if city_stamina is not None and city_stamina > 0:
+            reasons.append(f"都市活力还没清完（当前 {city_stamina}/{max_city_stamina}）")
+    return reasons
 
 
 def _api_get(url: str, cookie: str, params: dict[str, Any], with_ds: bool) -> dict[str, Any]:

@@ -18,7 +18,6 @@ try:
         GAME_KEY_NTE,
         BindingStore,
         HsrApiError,
-        bind_nte_by_sms,
         create_qr_login,
         daily_missing_text,
         fetch_daily_note,
@@ -33,13 +32,17 @@ try:
         get_nte_roles,
         game_name,
         get_login_cookie_by_qr,
+        login_nte_by_sms,
         is_daily_done,
         is_supported_game,
         make_nte_device_id,
+        nte_reminder_reasons,
         parse_commission_command,
         parse_reminder_value,
+        resolve_binding_path,
         save_qr_image,
         select_default_role,
+        select_nte_role,
         send_nte_sms_code,
         supports_mihoyo_login,
         supports_tajiduo_login,
@@ -51,7 +54,6 @@ except ImportError:
         GAME_KEY_NTE,
         BindingStore,
         HsrApiError,
-        bind_nte_by_sms,
         create_qr_login,
         daily_missing_text,
         fetch_daily_note,
@@ -66,13 +68,17 @@ except ImportError:
         get_nte_roles,
         game_name,
         get_login_cookie_by_qr,
+        login_nte_by_sms,
         is_daily_done,
         is_supported_game,
         make_nte_device_id,
+        nte_reminder_reasons,
         parse_commission_command,
         parse_reminder_value,
+        resolve_binding_path,
         save_qr_image,
         select_default_role,
+        select_nte_role,
         send_nte_sms_code,
         supports_mihoyo_login,
         supports_tajiduo_login,
@@ -84,7 +90,9 @@ class EryouDailyPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
         self.config = config or {}
-        data_path = Path(__file__).resolve().parent / "data" / "bindings.json"
+        plugin_dir = Path(__file__).resolve().parent
+        data_path = resolve_binding_path(plugin_dir)
+        self.data_dir = data_path.parent
         self.bindings = BindingStore(data_path)
         self._reminder_task = None
         self._ensure_reminder_task()
@@ -120,19 +128,32 @@ class EryouDailyPlugin(Star):
         elif action == "bind_game_menu":
             reply = await self._private_reply(event, sender_key, format_game_menu())
         elif action == "bind_game":
-            if not is_supported_game(value):
+            game_key, target_uid = _split_game_value(value)
+            if not is_supported_game(game_key):
                 reply = f"当前支持绑定：{supported_game_text()}。示例：/委托绑定 星铁"
-            elif supports_tajiduo_login(value):
+            elif supports_tajiduo_login(game_key):
                 account = self.bindings.get_tajiduo_account(sender_key)
                 if account:
-                    reply = await self._bind_nte_from_account(sender_key, account)
+                    reply = await self._bind_nte_from_account(sender_key, account, target_uid)
                 else:
-                    reply = await self._private_reply(event, sender_key, format_nte_bind_guide())
+                    self.bindings.set_pending(
+                        sender_key,
+                        {
+                            "type": "nte_target",
+                            "game": GAME_KEY_NTE,
+                            "target_uid": target_uid,
+                            "created_at": int(time()),
+                        },
+                    )
+                    guide = format_nte_bind_guide()
+                    if target_uid:
+                        guide = f"已记录要绑定的异环 UID：{target_uid}\n" + guide
+                    reply = await self._private_reply(event, sender_key, guide)
             elif self.bindings.get_account_cookie(sender_key):
                 cookie = self.bindings.get_account_cookie(sender_key)
-                reply = await self._bind_game_from_cookie(sender_key, value, cookie)
+                reply = await self._bind_game_from_cookie(sender_key, game_key, cookie)
             else:
-                text, image_path = await self._start_qr(sender_key, value)
+                text, image_path = await self._start_qr(sender_key, game_key)
                 if _is_private_event(event):
                     yield event.plain_result(text)
                     if image_path:
@@ -251,7 +272,7 @@ class EryouDailyPlugin(Star):
 
         try:
             qr = await asyncio.to_thread(create_qr_login)
-            image_path = Path(__file__).resolve().parent / "data" / f"qr_{_safe_key(sender_key)}.png"
+            image_path = self.data_dir / f"qr_{_safe_key(sender_key)}.png"
             await asyncio.to_thread(save_qr_image, qr["url"], image_path)
         except ImportError:
             return ("缺少二维码依赖。请安装 requirements.txt 后重载插件。", None)
@@ -313,6 +334,8 @@ class EryouDailyPlugin(Star):
             return "手机号格式不对。请发送：/委托发码 13800138000"
 
         device_id = make_nte_device_id()
+        old_pending = self.bindings.get_pending(sender_key) or {}
+        target_uid = str(old_pending.get("target_uid") or "")
         try:
             await asyncio.to_thread(send_nte_sms_code, mobile, device_id)
         except HsrApiError as exc:
@@ -327,6 +350,7 @@ class EryouDailyPlugin(Star):
                 "game": GAME_KEY_NTE,
                 "mobile": mobile,
                 "device_id": device_id,
+                "target_uid": target_uid,
                 "created_at": int(time()),
             },
         )
@@ -344,8 +368,8 @@ class EryouDailyPlugin(Star):
             return "没有进行中的异环短信登录。请先发送 /委托发码 手机号。"
 
         try:
-            account, role = await asyncio.to_thread(
-                bind_nte_by_sms,
+            account, roles = await asyncio.to_thread(
+                login_nte_by_sms,
                 pending["mobile"],
                 code,
                 pending["device_id"],
@@ -355,13 +379,24 @@ class EryouDailyPlugin(Star):
         except Exception as exc:
             return f"异环绑定失败：{exc}"
 
+        self.bindings.set_tajiduo_account(sender_key, account)
+        target_uid = str(pending.get("target_uid") or "")
+        try:
+            role = select_nte_role(roles, target_uid)
+        except HsrApiError as exc:
+            self.bindings.delete_pending(sender_key)
+            return f"塔吉多登录成功，但还没选定异环角色。{exc}"
+        if not role:
+            self.bindings.delete_pending(sender_key)
+            return "塔吉多登录成功，但这个账号没有找到异环角色。"
+
         self.bindings.set_tajiduo_binding(sender_key, account, role)
         self.bindings.delete_pending(sender_key)
         nickname = role.get("nickname") or "未知角色"
         uid = role.get("game_uid") or role.get("uid") or "未知 UID"
         return f"已绑定异环：{nickname}（UID {uid}）。以后发送 /委托 异环 就能检查今日状态。"
 
-    async def _bind_nte_from_account(self, sender_key: str, account: dict) -> str:
+    async def _bind_nte_from_account(self, sender_key: str, account: dict, target_uid: str = "") -> str:
         try:
             account, roles = await asyncio.to_thread(get_nte_roles, account)
         except HsrApiError as exc:
@@ -369,7 +404,10 @@ class EryouDailyPlugin(Star):
         except Exception as exc:
             return f"读取塔吉多账号失败：{exc}"
 
-        role = select_default_role(roles)
+        try:
+            role = select_nte_role(roles, target_uid)
+        except HsrApiError as exc:
+            return str(exc)
         if not role:
             return "这个塔吉多账号没有找到异环角色。"
 
@@ -535,16 +573,24 @@ class EryouDailyPlugin(Star):
             except Exception:
                 continue
 
-            if is_daily_done(game_key, note):
-                self.bindings.mark_reminded(sender_key, group_id, game_key, today)
-                continue
+            if game_key == GAME_KEY_NTE:
+                reasons = nte_reminder_reasons(note, check_city_stamina=now.weekday() == 6)
+                if not reasons:
+                    self.bindings.mark_reminded(sender_key, group_id, game_key, today)
+                    continue
+                reminder_text = f" 娜娜米提醒：{game_name(game_key)}" + "；".join(reasons) + "。今天这关还没过，先补一下比较稳。"
+            else:
+                if is_daily_done(game_key, note):
+                    self.bindings.mark_reminded(sender_key, group_id, game_key, today)
+                    continue
+                reminder_text = f" 娜娜米提醒：{game_name(game_key)}{daily_missing_text(game_key)}。今天这关还没过，先补一下比较稳。"
 
             await self.context.send_message(
                 group_umo,
                 MessageChain(
                     [
                         Comp.At(qq=int(sender_key) if sender_key.isdigit() else sender_key),
-                        Comp.Plain(f" {game_name(game_key)}{daily_missing_text(game_key)}，记得清一下。"),
+                        Comp.Plain(reminder_text),
                     ]
                 ),
             )
@@ -670,6 +716,11 @@ def _is_private_event(event: AstrMessageEvent) -> bool:
 
 def _safe_key(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]", "_", value)
+
+
+def _split_game_value(value: str) -> tuple[str, str]:
+    game_key, _, target_uid = str(value or "").partition(":")
+    return game_key, target_uid.strip()
 
 
 def _time_to_minutes(value: str) -> int | None:

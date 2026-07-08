@@ -1,4 +1,5 @@
 import unittest
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -8,13 +9,17 @@ from hsr_daily import (
     GAME_KEY_HSR,
     GAME_KEY_NTE,
     GAME_KEY_ZZZ,
+    HsrApiError,
     format_game_menu,
     format_group_bind_guide,
     format_nte_bind_guide,
     format_note_status,
     is_daily_done,
+    nte_reminder_reasons,
     parse_commission_command,
     parse_reminder_value,
+    resolve_binding_path,
+    select_nte_role,
 )
 
 
@@ -30,6 +35,7 @@ class HsrDailyTest(unittest.TestCase):
         self.assertEqual(parse_commission_command("/委托绑定 原神"), ("bind_game", GAME_KEY_GENSHIN))
         self.assertEqual(parse_commission_command("/委托绑定 绝区零"), ("bind_game", GAME_KEY_ZZZ))
         self.assertEqual(parse_commission_command("/委托绑定 异环"), ("bind_game", GAME_KEY_NTE))
+        self.assertEqual(parse_commission_command("/委托绑定 异环 116771663"), ("bind_game", "nte:116771663"))
         self.assertEqual(parse_commission_command("/委托发码 13800138000"), ("sms", "13800138000"))
         self.assertEqual(parse_commission_command("/委托扫码"), ("qr", ""))
         self.assertEqual(parse_commission_command("/委托确认"), ("confirm", ""))
@@ -77,7 +83,7 @@ class HsrDailyTest(unittest.TestCase):
         self.assertIn("开拓力：120/240", text)
         self.assertIn("后备开拓力：300", text)
         self.assertNotIn("派" + "遣", text)
-        self.assertIn("今天的每日已经 Clear。", text)
+        self.assertIn("今天这关已经通过了，可以稍微休息一下。", text)
 
     def test_format_genshin_status_clear(self):
         role = {"nickname": "旅行者", "game_uid": "100000001"}
@@ -128,7 +134,47 @@ class HsrDailyTest(unittest.TestCase):
         self.assertTrue(is_daily_done(GAME_KEY_NTE, note))
         self.assertIn("本性像素：160/240", text)
         self.assertIn("都市活力：60/100", text)
-        self.assertIn("今日活跃：100/100，已完成", text)
+        self.assertIn("活跃度：100/100，已完成", text)
+        self.assertNotIn("今日活跃", text)
+
+    def test_nte_reminder_reasons(self):
+        note = {"dayvalue": 80, "citystaminaValue": 10, "citystaminaMaxValue": 100}
+
+        self.assertEqual(nte_reminder_reasons(note), ["活跃度还没到 100（当前 80/100）"])
+        self.assertEqual(
+            nte_reminder_reasons(note, check_city_stamina=True),
+            ["活跃度还没到 100（当前 80/100）", "都市活力还没清完（当前 10/100）"],
+        )
+        self.assertEqual(
+            nte_reminder_reasons({"dayvalue": 100, "citystaminaValue": 10}, check_city_stamina=True),
+            ["都市活力还没清完（当前 10/100）"],
+        )
+
+    def test_select_nte_role_requires_uid_when_multiple_roles(self):
+        roles = [
+            {"game_uid": "111", "nickname": "角色一"},
+            {"game_uid": "222", "nickname": "角色二"},
+        ]
+
+        role = select_nte_role(roles, "222")
+
+        self.assertEqual(role["game_uid"], "222")
+        with self.assertRaises(HsrApiError):
+            select_nte_role(roles)
+
+    def test_resolve_binding_path_migrates_old_plugin_data(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plugin_dir = root / "plugin"
+            home_dir = root / "home"
+            old_path = plugin_dir / "data" / "bindings.json"
+            old_path.parent.mkdir(parents=True)
+            old_data = {"users": {"123": {"games": {}}}}
+            old_path.write_text(json.dumps(old_data), encoding="utf-8")
+
+            new_path = resolve_binding_path(plugin_dir, home_dir)
+            self.assertEqual(new_path, home_dir / ".astrbot_eryou_daily" / "bindings.json")
+            self.assertEqual(json.loads(new_path.read_text(encoding="utf-8")), old_data)
 
     def test_store_keeps_mihoyo_and_tajiduo_accounts(self):
         with TemporaryDirectory() as temp_dir:
