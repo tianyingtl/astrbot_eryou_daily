@@ -15,49 +15,67 @@ from astrbot.api.star import Context, Star
 try:
     from .hsr_daily import (
         GAME_KEY_HSR,
+        GAME_KEY_NTE,
         BindingStore,
         HsrApiError,
+        bind_nte_by_sms,
         create_qr_login,
         daily_missing_text,
         fetch_daily_note,
+        fetch_nte_daily_note,
         format_game_menu,
         format_help,
+        format_nte_bind_guide,
         format_note_status,
         format_not_bound,
         format_reminder_usage,
         get_game_roles,
+        get_nte_roles,
         game_name,
         get_login_cookie_by_qr,
         is_daily_done,
         is_supported_game,
+        make_nte_device_id,
         parse_commission_command,
         parse_reminder_value,
         save_qr_image,
         select_default_role,
+        send_nte_sms_code,
+        supports_mihoyo_login,
+        supports_tajiduo_login,
         supported_game_text,
     )
 except ImportError:
     from hsr_daily import (
         GAME_KEY_HSR,
+        GAME_KEY_NTE,
         BindingStore,
         HsrApiError,
+        bind_nte_by_sms,
         create_qr_login,
         daily_missing_text,
         fetch_daily_note,
+        fetch_nte_daily_note,
         format_game_menu,
         format_help,
+        format_nte_bind_guide,
         format_note_status,
         format_not_bound,
         format_reminder_usage,
         get_game_roles,
+        get_nte_roles,
         game_name,
         get_login_cookie_by_qr,
         is_daily_done,
         is_supported_game,
+        make_nte_device_id,
         parse_commission_command,
         parse_reminder_value,
         save_qr_image,
         select_default_role,
+        send_nte_sms_code,
+        supports_mihoyo_login,
+        supports_tajiduo_login,
         supported_game_text,
     )
 
@@ -104,6 +122,12 @@ class EryouDailyPlugin(Star):
         elif action == "bind_game":
             if not is_supported_game(value):
                 reply = f"当前支持绑定：{supported_game_text()}。示例：/委托绑定 星铁"
+            elif supports_tajiduo_login(value):
+                account = self.bindings.get_tajiduo_account(sender_key)
+                if account:
+                    reply = await self._bind_nte_from_account(sender_key, account)
+                else:
+                    reply = await self._private_reply(event, sender_key, format_nte_bind_guide())
             elif self.bindings.get_account_cookie(sender_key):
                 cookie = self.bindings.get_account_cookie(sender_key)
                 reply = await self._bind_game_from_cookie(sender_key, value, cookie)
@@ -131,12 +155,17 @@ class EryouDailyPlugin(Star):
                 )
             event.stop_event()
             return
+        elif action == "sms":
+            reply = await self._start_nte_sms(event, sender_key, value)
         elif action == "confirm":
-            reply = await self._private_reply(
-                event,
-                sender_key,
-                await self._confirm_qr(sender_key),
-            )
+            if value:
+                reply = await self._confirm_nte_sms(event, sender_key, value)
+            else:
+                reply = await self._private_reply(
+                    event,
+                    sender_key,
+                    await self._confirm_qr(sender_key),
+                )
         elif action == "reminder_set":
             reply = await self._set_reminder(event, sender_key, value)
         elif action == "unbind":
@@ -183,9 +212,13 @@ class EryouDailyPlugin(Star):
         if error:
             return error
 
-        cookie = self.bindings.get_account_cookie(sender_key)
         binding = self.bindings.get_game_binding(sender_key, game_key)
-        if not cookie or not binding:
+        if not binding:
+            return f"请先绑定{game_name(game_key)}账号，再设置提醒：/委托绑定 {game_name(game_key)}"
+        if supports_tajiduo_login(game_key):
+            if not self.bindings.get_tajiduo_account(sender_key):
+                return f"请先绑定{game_name(game_key)}账号，再设置提醒：/委托绑定 {game_name(game_key)}"
+        elif not self.bindings.get_account_cookie(sender_key):
             return f"请先绑定{game_name(game_key)}账号，再设置提醒：/委托绑定 {game_name(game_key)}"
 
         now = datetime.now()
@@ -213,6 +246,8 @@ class EryouDailyPlugin(Star):
         game_key = game_key or pending.get("game") or GAME_KEY_HSR
         if not is_supported_game(game_key):
             return (f"当前支持绑定：{supported_game_text()}。示例：/委托绑定 星铁", None)
+        if not supports_mihoyo_login(game_key):
+            return (format_nte_bind_guide(), None)
 
         try:
             qr = await asyncio.to_thread(create_qr_login)
@@ -270,9 +305,84 @@ class EryouDailyPlugin(Star):
         self.bindings.delete_pending(sender_key)
         return reply
 
+    async def _start_nte_sms(self, event: AstrMessageEvent, sender_key: str, mobile: str) -> str:
+        if not _is_private_event(event):
+            return await self._private_reply(event, sender_key, format_nte_bind_guide())
+        mobile = re.sub(r"\D+", "", mobile or "")
+        if not re.fullmatch(r"1\d{10}", mobile):
+            return "手机号格式不对。请发送：/委托发码 13800138000"
+
+        device_id = make_nte_device_id()
+        try:
+            await asyncio.to_thread(send_nte_sms_code, mobile, device_id)
+        except HsrApiError as exc:
+            return f"异环短信发送失败：{exc}"
+        except Exception as exc:
+            return f"异环短信发送失败：{exc}"
+
+        self.bindings.set_pending(
+            sender_key,
+            {
+                "type": "nte_sms",
+                "game": GAME_KEY_NTE,
+                "mobile": mobile,
+                "device_id": device_id,
+                "created_at": int(time()),
+            },
+        )
+        return "验证码已发送。收到后请在私聊发送：/委托确认 验证码"
+
+    async def _confirm_nte_sms(self, event: AstrMessageEvent, sender_key: str, code: str) -> str:
+        if not _is_private_event(event):
+            return await self._private_reply(event, sender_key, "请在私聊窗口发送：/委托确认 验证码")
+        code = re.sub(r"\D+", "", code or "")
+        if not re.fullmatch(r"\d{4,8}", code):
+            return "验证码格式不对。请发送：/委托确认 123456"
+
+        pending = self.bindings.get_pending(sender_key)
+        if not pending or pending.get("type") != "nte_sms":
+            return "没有进行中的异环短信登录。请先发送 /委托发码 手机号。"
+
+        try:
+            account, role = await asyncio.to_thread(
+                bind_nte_by_sms,
+                pending["mobile"],
+                code,
+                pending["device_id"],
+            )
+        except HsrApiError as exc:
+            return f"异环绑定失败：{exc}"
+        except Exception as exc:
+            return f"异环绑定失败：{exc}"
+
+        self.bindings.set_tajiduo_binding(sender_key, account, role)
+        self.bindings.delete_pending(sender_key)
+        nickname = role.get("nickname") or "未知角色"
+        uid = role.get("game_uid") or role.get("uid") or "未知 UID"
+        return f"已绑定异环：{nickname}（UID {uid}）。以后发送 /委托 异环 就能检查今日状态。"
+
+    async def _bind_nte_from_account(self, sender_key: str, account: dict) -> str:
+        try:
+            account, roles = await asyncio.to_thread(get_nte_roles, account)
+        except HsrApiError as exc:
+            return f"读取塔吉多账号失败：{exc}"
+        except Exception as exc:
+            return f"读取塔吉多账号失败：{exc}"
+
+        role = select_default_role(roles)
+        if not role:
+            return "这个塔吉多账号没有找到异环角色。"
+
+        self.bindings.set_tajiduo_binding(sender_key, account, role)
+        nickname = role.get("nickname") or "未知角色"
+        uid = role.get("game_uid") or role.get("uid") or "未知 UID"
+        return f"已绑定异环：{nickname}（UID {uid}）。以后发送 /委托 异环 就能检查今日状态。"
+
     async def _bind_game_from_cookie(self, sender_key: str, game_key: str, cookie: str) -> str:
         if not is_supported_game(game_key):
             return f"当前支持绑定：{supported_game_text()}。示例：/委托绑定 星铁"
+        if not supports_mihoyo_login(game_key):
+            return format_nte_bind_guide()
 
         try:
             roles = await asyncio.to_thread(get_game_roles, cookie, game_key)
@@ -292,7 +402,7 @@ class EryouDailyPlugin(Star):
 
     def _unbind(self, sender_key: str) -> str:
         if self.bindings.delete_user(sender_key):
-            return "已解绑本地米游社账号和游戏绑定。"
+            return "已解绑本地账号、游戏绑定和提醒设置。"
         return "你还没有绑定账号。"
 
     async def _check(self, sender_key: str, game_key: str) -> str:
@@ -307,7 +417,7 @@ class EryouDailyPlugin(Star):
             if not bindings:
                 return bind_reply
 
-        if not bindings or not cookie:
+        if not bindings:
             return format_not_bound()
 
         replies = []
@@ -322,6 +432,9 @@ class EryouDailyPlugin(Star):
             return f"当前支持：{supported_game_text()}。"
 
         binding = self.bindings.get_game_binding(sender_key, game_key)
+        if supports_tajiduo_login(game_key):
+            return await self._check_nte(sender_key, binding)
+
         cookie = self.bindings.get_account_cookie(sender_key)
         if not binding and cookie:
             bind_reply = await self._bind_game_from_cookie(sender_key, game_key, cookie)
@@ -345,6 +458,31 @@ class EryouDailyPlugin(Star):
             return f"查询失败：{exc}"
 
         return format_note_status(game_key, binding["role"], note)
+
+    async def _check_nte(self, sender_key: str, binding: dict | None) -> str:
+        account = self.bindings.get_tajiduo_account(sender_key)
+        if not binding and account:
+            bind_reply = await self._bind_nte_from_account(sender_key, account)
+            binding = self.bindings.get_game_binding(sender_key, GAME_KEY_NTE)
+            if not binding:
+                return bind_reply
+
+        if not binding or not account:
+            return "你还没有绑定异环。请先发送 /委托绑定 异环"
+
+        try:
+            account, note = await asyncio.to_thread(
+                fetch_nte_daily_note,
+                account,
+                binding["role"],
+            )
+        except HsrApiError as exc:
+            return f"查询失败：{exc}"
+        except Exception as exc:
+            return f"查询失败：{exc}"
+
+        self.bindings.set_tajiduo_account(sender_key, account)
+        return format_note_status(GAME_KEY_NTE, binding["role"], note)
 
     async def _reminder_loop(self) -> None:
         while True:
@@ -375,14 +513,25 @@ class EryouDailyPlugin(Star):
             if due_minutes is None or current_minutes < due_minutes:
                 continue
 
-            cookie = self.bindings.get_account_cookie(sender_key)
             binding = self.bindings.get_game_binding(sender_key, game_key)
-            if not cookie or not binding:
+            if not binding:
                 self.bindings.mark_reminded(sender_key, group_id, game_key, today)
                 continue
 
             try:
-                note = await asyncio.to_thread(fetch_daily_note, cookie, binding["role"], game_key)
+                if supports_tajiduo_login(game_key):
+                    account = self.bindings.get_tajiduo_account(sender_key)
+                    if not account:
+                        self.bindings.mark_reminded(sender_key, group_id, game_key, today)
+                        continue
+                    account, note = await asyncio.to_thread(fetch_nte_daily_note, account, binding["role"])
+                    self.bindings.set_tajiduo_account(sender_key, account)
+                else:
+                    cookie = self.bindings.get_account_cookie(sender_key)
+                    if not cookie:
+                        self.bindings.mark_reminded(sender_key, group_id, game_key, today)
+                        continue
+                    note = await asyncio.to_thread(fetch_daily_note, cookie, binding["role"], game_key)
             except Exception:
                 continue
 

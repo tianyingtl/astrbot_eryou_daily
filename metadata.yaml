@@ -1,6 +1,6 @@
 name: astrbot_eryou_daily
-desc: 检测星铁、原神、绝区零每日状态
-version: v1.0.3
+desc: 检测星铁、原神、绝区零、异环每日状态和体力
+version: v1.0.4
 author: tianying
 repo: "https://github.com/tianyingtl/astrbot_eryou_daily"
 support_platforms:

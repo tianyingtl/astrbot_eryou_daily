@@ -6,6 +6,7 @@ import random
 import re
 import time
 import uuid
+from base64 import b64encode
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -16,6 +17,7 @@ from urllib.request import Request, urlopen
 GAME_KEY_HSR = "hkrpg"
 GAME_KEY_GENSHIN = "genshin"
 GAME_KEY_ZZZ = "zzz"
+GAME_KEY_NTE = "nte"
 GAMES = {
     GAME_KEY_HSR: {
         "name": "崩坏：星穹铁道",
@@ -31,6 +33,12 @@ GAMES = {
         "name": "绝区零",
         "short_name": "绝区零",
         "game_biz": "nap_cn",
+    },
+    GAME_KEY_NTE: {
+        "name": "异环",
+        "short_name": "异环",
+        "provider": "tajiduo",
+        "game_id": "1289",
     },
 }
 GAME_ALIASES = {
@@ -51,6 +59,11 @@ GAME_ALIASES = {
     "zenless": GAME_KEY_ZZZ,
     "zenlesszonezero": GAME_KEY_ZZZ,
     "nap": GAME_KEY_ZZZ,
+    "异环": GAME_KEY_NTE,
+    "yihuan": GAME_KEY_NTE,
+    "yh": GAME_KEY_NTE,
+    "nte": GAME_KEY_NTE,
+    "nevernesstoeverness": GAME_KEY_NTE,
 }
 
 BINDING_URL = "https://api-takumi.mihoyo.com/binding/api/getUserGameRolesByCookie"
@@ -64,6 +77,19 @@ NOTE_URLS = {
 }
 QR_CREATE_URL = "https://passport-api.miyoushe.com/account/ma-cn-passport/web/createQRLogin"
 QR_QUERY_URL = "https://passport-api.miyoushe.com/account/ma-cn-passport/web/queryQRLoginStatus"
+
+LAOHU_BASE_URL = "https://user.laohu.com"
+LAOHU_APP_ID = 10550
+LAOHU_APP_KEY = "89155cc4e8634ec5b1b6364013b23e3e"
+LAOHU_SDK_VERSION = "4.273.0"
+LAOHU_PACKAGE = "com.pwrd.htassistant"
+LAOHU_VERSION_CODE = 12
+TAJIDUO_BASE_URL = "https://bbs-api.tajiduo.com"
+TAJIDUO_USER_CENTER_APP_ID = "10551"
+TAJIDUO_APP_VERSION = "1.2.4"
+TAJIDUO_CLIENT_UID = "0"
+TAJIDUO_DS_SALT = "pUds3dfMkl"
+TAJIDUO_DS_NONCE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 APP_VERSION = "2.71.1"
 QR_APP_ID = "bll8iq97cem8"
@@ -82,14 +108,42 @@ class BindingStore:
         self.path = path
 
     def get_account_cookie(self, sender_key: str) -> str | None:
-        account = self._get_user(sender_key).get("account") or {}
+        user = self._get_user(sender_key)
+        accounts = user.get("accounts") or {}
+        account = accounts.get("mihoyo") or user.get("account") or {}
         cookie = account.get("cookie")
         return str(cookie) if cookie else None
 
     def set_account_cookie(self, sender_key: str, cookie: str) -> None:
         data = self._load()
         user = data.setdefault("users", {}).setdefault(sender_key, {})
+        user.setdefault("accounts", {})["mihoyo"] = {"provider": "mihoyo", "cookie": cookie}
         user["account"] = {"provider": "mihoyo", "cookie": cookie}
+        self._save(data)
+
+    def get_tajiduo_account(self, sender_key: str) -> dict[str, Any] | None:
+        user = self._get_user(sender_key)
+        accounts = user.get("accounts") or {}
+        account = accounts.get("tajiduo")
+        if not account and (user.get("account") or {}).get("provider") == "tajiduo":
+            account = user.get("account")
+        return dict(account) if account else None
+
+    def set_tajiduo_account(self, sender_key: str, account: dict[str, Any]) -> None:
+        data = self._load()
+        user = data.setdefault("users", {}).setdefault(sender_key, {})
+        saved = dict(account)
+        saved["provider"] = "tajiduo"
+        user.setdefault("accounts", {})["tajiduo"] = saved
+        self._save(data)
+
+    def set_tajiduo_binding(self, sender_key: str, account: dict[str, Any], role: dict[str, Any]) -> None:
+        data = self._load()
+        user = data.setdefault("users", {}).setdefault(sender_key, {})
+        saved = dict(account)
+        saved["provider"] = "tajiduo"
+        user.setdefault("accounts", {})["tajiduo"] = saved
+        user.setdefault("games", {})[GAME_KEY_NTE] = {"role": role}
         self._save(data)
 
     def get_game_binding(self, sender_key: str, game_key: str) -> dict[str, Any] | None:
@@ -234,8 +288,10 @@ def parse_commission_command(message: str) -> tuple[str, str] | None:
         if rest.startswith("扫码"):
             game_text = rest[len("扫码"):].strip()
             return ("qr", resolve_game_key(game_text) or "")
-        if rest == "确认":
-            return ("confirm", "")
+        if rest.startswith("发码"):
+            return ("sms", rest[len("发码"):].strip())
+        if rest.startswith("确认"):
+            return ("confirm", rest[len("确认"):].strip())
         if rest == "解绑":
             return ("unbind", "")
         game_key = resolve_game_key(rest)
@@ -252,7 +308,7 @@ def parse_reminder_value(value: str) -> tuple[str | None, str | None, str | None
 
     game_key = resolve_game_key(parts[0])
     if not game_key:
-        return None, None, "当前支持设置提醒：星铁、原神、绝区零。正确格式：/委托设置 星铁 20:00"
+        return None, None, f"当前支持设置提醒：{supported_game_text()}。正确格式：/委托设置 星铁 20:00"
 
     match = re.fullmatch(r"([01]?\d|2[0-3])[:：]([0-5]\d)", parts[1])
     if not match:
@@ -280,16 +336,31 @@ def is_supported_game(game_key: str) -> bool:
     return game_key in GAMES
 
 
+def game_provider(game_key: str) -> str:
+    return str(GAMES.get(game_key, {}).get("provider", "mihoyo"))
+
+
+def supports_mihoyo_login(game_key: str) -> bool:
+    return game_provider(game_key) == "mihoyo"
+
+
+def supports_tajiduo_login(game_key: str) -> bool:
+    return game_provider(game_key) == "tajiduo"
+
+
 def format_help() -> str:
     return "\n".join(
         [
             "二游每日检查：",
             "/委托：检查已绑定游戏的今日每日状态",
-            "/委托 星铁/原神/绝区零：检查指定游戏",
+            "/委托 星铁/原神/绝区零/异环：检查指定游戏",
             "/委托绑定：选择要绑定的游戏",
             "/委托绑定 星铁/原神/绝区零：直接发送米游社登录二维码",
+            "/委托绑定 异环：使用塔吉多手机号短信登录",
+            "/委托发码 手机号：异环发送短信验证码",
             "/委托扫码：二维码过期时重新生成",
-            "/委托确认：扫码确认后完成绑定",
+            "/委托确认：米游社扫码确认后完成绑定",
+            "/委托确认 验证码：异环短信验证后完成绑定",
             "/委托设置 星铁 20:00：到点未完成时在本群提醒你",
             "/委托解绑：删除本地绑定",
         ]
@@ -312,9 +383,22 @@ def format_game_menu() -> str:
             "/委托绑定 星铁",
             "/委托绑定 原神",
             "/委托绑定 绝区零",
+            "/委托绑定 异环",
             "",
-            "发送后机器人会私聊米游社登录二维码。",
-            "说明：绑定的是米游社账号。以后同一米游社账号支持更多米家游戏时，不需要重复登录。",
+            "米家游戏会私聊米游社登录二维码。",
+            "异环会走塔吉多手机号短信登录，请按私聊提示发码和确认。",
+        ]
+    )
+
+
+def format_nte_bind_guide() -> str:
+    return "\n".join(
+        [
+            "异环绑定使用塔吉多账号手机号短信登录。",
+            "请在私聊里发送：/委托发码 手机号",
+            "收到短信验证码后发送：/委托确认 验证码",
+            "示例：/委托发码 13800138000",
+            "说明：手机号和验证码只用于本次登录，插件会保存塔吉多 token 到本地 data/ 目录。",
         ]
     )
 
@@ -323,7 +407,7 @@ def format_not_bound() -> str:
     return "\n".join(
         [
             "你还没有绑定游戏。",
-            "请私聊机器人发送 /委托绑定，然后按提示选择游戏 -> 扫码 -> 确认。",
+            "请私聊机器人发送 /委托绑定，然后按提示选择游戏并完成登录。",
         ]
     )
 
@@ -333,7 +417,7 @@ def format_reminder_usage() -> str:
         [
             "格式不对。正确格式：/委托设置 游戏名 时间",
             "示例：/委托设置 星铁 20:00",
-            "支持游戏：星铁、原神、绝区零。",
+            f"支持游戏：{supported_game_text()}。",
             "时间格式：24小时制 HH:MM，例如 08:30、20:00。",
         ]
     )
@@ -383,10 +467,115 @@ def get_login_cookie_by_qr(ticket: str, device_id: str) -> str:
     return cookie
 
 
+def make_nte_device_id() -> str:
+    return f"HT{uuid.uuid4().hex[:14].upper()}"
+
+
+def send_nte_sms_code(mobile: str, device_id: str) -> None:
+    params = _laohu_common_fields(device_id, use_millis=False)
+    params.update({"cellphone": mobile, "areaCodeId": "1", "type": "16"})
+    _laohu_submit("/m/newApi/sendPhoneCaptchaWithOutLogin", params)
+
+
+def bind_nte_by_sms(mobile: str, code: str, device_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    laohu = _laohu_login_by_sms(mobile, code, device_id)
+    account = _tajiduo_user_center_login(laohu["token"], laohu["user_id"], device_id)
+    account, roles = get_nte_roles(account)
+    role = select_default_role(roles)
+    if not role:
+        raise HsrApiError("这个塔吉多账号没有找到异环角色。")
+    return account, role
+
+
+def get_nte_roles(account: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    account = ensure_tajiduo_account(account)
+    game_id = GAMES[GAME_KEY_NTE]["game_id"]
+    data = _tajiduo_request(
+        account,
+        "/usercenter/api/v2/getGameRoles",
+        query={"gameId": game_id},
+    )
+
+    if isinstance(data, list):
+        raw_roles = data
+    elif isinstance(data, dict):
+        raw_roles = data.get("roles") or []
+    else:
+        raw_roles = []
+
+    roles = [_format_nte_role(role) for role in raw_roles if isinstance(role, dict)]
+    if roles:
+        return account, roles
+
+    bind_role = _tajiduo_request(
+        account,
+        "/apihub/api/getGameBindRole",
+        query={"uid": account.get("center_uid", ""), "gameId": game_id},
+    )
+    if isinstance(bind_role, dict):
+        role = _format_nte_role(bind_role)
+        if role.get("game_uid"):
+            roles.append(role)
+    return account, roles
+
+
+def fetch_nte_daily_note(
+    account: dict[str, Any],
+    role: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    role_id = role.get("game_uid") or role.get("uid") or role.get("role_id")
+    if not role_id:
+        raise HsrApiError("绑定的异环角色信息不完整，请重新绑定。")
+    account = ensure_tajiduo_account(account)
+    note = _tajiduo_request(
+        account,
+        "/apihub/awapi/yh/roleHome",
+        query={"roleId": str(role_id)},
+    )
+    if not isinstance(note, dict):
+        raise HsrApiError("异环接口返回格式异常。")
+    return account, note
+
+
+def ensure_tajiduo_account(account: dict[str, Any]) -> dict[str, Any]:
+    account = dict(account or {})
+    access_token = str(account.get("access_token") or "")
+    updated_at = int(account.get("access_token_updated_at") or 0)
+    if access_token and time.time() - updated_at < 3300:
+        return account
+
+    refresh_token = str(account.get("refresh_token") or "")
+    if not refresh_token:
+        raise HsrApiError("塔吉多登录态已过期，请重新绑定异环。")
+
+    headers = _tajiduo_headers(str(account.get("device_id") or make_nte_device_id()), refresh_token)
+    data = _tajiduo_extract(
+        _request_json(
+            TAJIDUO_BASE_URL,
+            "/usercenter/api/refreshToken",
+            method="POST",
+            headers=headers,
+            error_prefix="塔吉多",
+        ),
+        "/usercenter/api/refreshToken",
+    )
+    access_token = str(data.get("accessToken") or "") if isinstance(data, dict) else ""
+    new_refresh = str(data.get("refreshToken") or "") if isinstance(data, dict) else ""
+    if not access_token or not new_refresh:
+        raise HsrApiError("塔吉多刷新登录态失败，请重新绑定异环。")
+
+    account["access_token"] = access_token
+    account["refresh_token"] = new_refresh
+    account["access_token_updated_at"] = int(time.time())
+    return account
+
+
 def get_game_roles(cookie: str, game_key: str) -> list[dict[str, Any]]:
     game = GAMES.get(game_key)
     if not game:
         raise HsrApiError("当前版本不支持这个游戏。")
+    if not supports_mihoyo_login(game_key):
+        raise HsrApiError(f"{game_name(game_key)}不使用米游社账号绑定。")
 
     game_biz = game["game_biz"]
     payload = _api_get(BINDING_URL, cookie, {"game_biz": game_biz}, with_ds=False)
@@ -429,6 +618,8 @@ def fetch_daily_note(cookie: str, role: dict[str, Any], game_key: str) -> dict[s
 
 
 def format_note_status(game_key: str, role: dict[str, Any], note: dict[str, Any]) -> str:
+    if game_key == GAME_KEY_NTE:
+        return _format_nte_status(role, note)
     if game_key == GAME_KEY_GENSHIN:
         return _format_genshin_status(role, note)
     if game_key == GAME_KEY_ZZZ:
@@ -437,6 +628,8 @@ def format_note_status(game_key: str, role: dict[str, Any], note: dict[str, Any]
 
 
 def is_daily_done(game_key: str, note: dict[str, Any]) -> bool:
+    if game_key == GAME_KEY_NTE:
+        return is_nte_done(note)
     if game_key == GAME_KEY_GENSHIN:
         return is_genshin_done(note)
     if game_key == GAME_KEY_ZZZ:
@@ -445,6 +638,8 @@ def is_daily_done(game_key: str, note: dict[str, Any]) -> bool:
 
 
 def daily_missing_text(game_key: str) -> str:
+    if game_key == GAME_KEY_NTE:
+        return "今日活跃还没完成"
     if game_key == GAME_KEY_GENSHIN:
         return "每日委托还没完成或奖励未领取"
     if game_key == GAME_KEY_ZZZ:
@@ -458,13 +653,19 @@ def _format_hsr_status(role: dict[str, Any], note: dict[str, Any]) -> str:
 
     current_train = _first_int(note, "current_train_score")
     max_train = _first_int(note, "max_train_score") or 500
+    current_stamina = _first_int(note, "current_stamina", "stamina")
+    max_stamina = _first_int(note, "max_stamina", "stamina_max") or 240
+    reserve_stamina = _first_int(note, "current_reserve_stamina", "reserve_stamina")
     train_done = is_train_done(note)
 
     lines = [
         "星铁今日委托检查",
         f"账号：{nickname}（UID {uid}）",
+        f"开拓力：{_score_text(current_stamina)}/{max_stamina}",
         f"每日实训：{_score_text(current_train)}/{max_train}，{'已完成' if train_done else '未完成'}",
     ]
+    if reserve_stamina is not None:
+        lines.append(f"后备开拓力：{reserve_stamina}")
 
     if train_done:
         lines.append("今天的每日已经 Clear。")
@@ -480,12 +681,15 @@ def _format_genshin_status(role: dict[str, Any], note: dict[str, Any]) -> str:
 
     current = _first_int(note, "current_commission_num")
     max_count = _first_int(note, "max_commission_num") or 4
+    current_resin = _first_int(note, "current_resin")
+    max_resin = _first_int(note, "max_resin") or 200
     reward_received = bool(note.get("is_extra_task_reward_received"))
     done = is_genshin_done(note)
 
     lines = [
         "原神今日委托检查",
         f"账号：{nickname}（UID {uid}）",
+        f"原粹树脂：{_score_text(current_resin)}/{max_resin}",
         f"每日委托：{_score_text(current)}/{max_count}，{'已完成' if current is not None and current >= max_count else '未完成'}",
         f"凯瑟琳奖励：{'已领取' if reward_received else '未领取'}",
     ]
@@ -508,16 +712,45 @@ def _format_zzz_status(role: dict[str, Any], note: dict[str, Any]) -> str:
     uid = role.get("game_uid") or role.get("uid") or "未知 UID"
 
     current, max_count = _zzz_vitality(note)
+    energy_current, energy_max = _zzz_energy(note)
     card_sign = _zzz_card_sign_text(note)
     done = is_zzz_done(note)
 
     lines = [
         "绝区零今日委托检查",
         f"账号：{nickname}（UID {uid}）",
+        f"电量：{_score_text(energy_current)}/{energy_max}",
         f"今日活跃：{_score_text(current)}/{max_count}，{'已完成' if done else '未完成'}",
     ]
     if card_sign:
         lines.append(f"刮刮卡：{card_sign}")
+
+    if done:
+        lines.append("今天的每日已经 Clear。")
+    else:
+        lines.append("还没 Clear：今日活跃还没满。")
+
+    return "\n".join(lines)
+
+
+def _format_nte_status(role: dict[str, Any], note: dict[str, Any]) -> str:
+    nickname = note.get("rolename") or role.get("nickname") or "未知角色"
+    uid = note.get("roleid") or role.get("game_uid") or role.get("uid") or "未知 UID"
+
+    stamina = _first_int(note, "staminaValue")
+    max_stamina = _first_int(note, "staminaMaxValue") or 240
+    city_stamina = _first_int(note, "citystaminaValue")
+    max_city_stamina = _first_int(note, "citystaminaMaxValue") or 100
+    day_value = _first_int(note, "dayvalue")
+    done = is_nte_done(note)
+
+    lines = [
+        "异环今日委托检查",
+        f"账号：{nickname}（UID {uid}）",
+        f"本性像素：{_score_text(stamina)}/{max_stamina}",
+        f"都市活力：{_score_text(city_stamina)}/{max_city_stamina}",
+        f"今日活跃：{_score_text(day_value)}/100，{'已完成' if done else '未完成'}",
+    ]
 
     if done:
         lines.append("今天的每日已经 Clear。")
@@ -542,6 +775,11 @@ def is_genshin_done(note: dict[str, Any]) -> bool:
 def is_zzz_done(note: dict[str, Any]) -> bool:
     current, max_count = _zzz_vitality(note)
     return current is not None and current >= max_count
+
+
+def is_nte_done(note: dict[str, Any]) -> bool:
+    day_value = _first_int(note, "dayvalue")
+    return day_value is not None and day_value >= 100
 
 
 def _api_get(url: str, cookie: str, params: dict[str, Any], with_ds: bool) -> dict[str, Any]:
@@ -576,6 +814,204 @@ def _api_post_json(
     except URLError as exc:
         raise HsrApiError(f"连接米游社失败：{exc.reason}") from exc
     return json.loads(text), set_cookie
+
+
+def _laohu_login_by_sms(mobile: str, code: str, device_id: str) -> dict[str, str]:
+    try:
+        from Crypto.Cipher import AES
+        from Crypto.Util.Padding import pad
+    except ImportError as exc:
+        raise HsrApiError("缺少异环登录依赖 pycryptodome，请安装 requirements.txt 后重载插件。") from exc
+
+    aes_key = LAOHU_APP_KEY[-16:].encode("utf-8")
+
+    def encrypt(value: str) -> str:
+        cipher = AES.new(aes_key, AES.MODE_ECB)
+        return b64encode(cipher.encrypt(pad(value.encode("utf-8"), AES.block_size))).decode("ascii")
+
+    _laohu_check_sms_code(mobile, code, device_id)
+
+    params = _laohu_common_fields(device_id, use_millis=True)
+    params.update(
+        {
+            "cellphone": encrypt(mobile),
+            "captcha": encrypt(code),
+            "areaCodeId": "1",
+            "type": "16",
+        }
+    )
+    data = _laohu_submit("/openApi/sms/new/login", params, keep_empty=True)
+    user_id = data.get("userId") if isinstance(data, dict) else None
+    token = data.get("token") if isinstance(data, dict) else None
+    if user_id is None or not token:
+        raise HsrApiError("老虎账号登录返回格式异常。")
+    return {"user_id": str(user_id), "token": str(token)}
+
+
+def _laohu_check_sms_code(mobile: str, code: str, device_id: str) -> None:
+    params = _laohu_common_fields(device_id, use_millis=False)
+    params.update({"cellphone": mobile, "captcha": code})
+    _laohu_submit("/m/newApi/checkPhoneCaptchaWithOutLogin", params)
+
+
+def _laohu_common_fields(device_id: str, use_millis: bool) -> dict[str, str]:
+    timestamp = int(time.time() * 1000) if use_millis else int(time.time())
+    fields = {
+        "appId": str(LAOHU_APP_ID),
+        "channelId": "1",
+        "deviceId": device_id,
+        "deviceType": "Pixel 6",
+        "deviceModel": "Pixel 6",
+        "deviceName": "Pixel 6",
+        "deviceSys": "Android 14",
+        "adm": device_id,
+        "idfa": "",
+        "sdkVersion": LAOHU_SDK_VERSION,
+        "bid": LAOHU_PACKAGE,
+        "t": str(timestamp),
+    }
+    if use_millis:
+        fields["version"] = str(LAOHU_VERSION_CODE)
+        fields["mac"] = ""
+    else:
+        fields["versionCode"] = str(LAOHU_VERSION_CODE)
+        fields["imei"] = ""
+    return fields
+
+
+def _laohu_submit(path: str, params: dict[str, str], keep_empty: bool = False) -> Any:
+    signed = dict(params)
+    raw = "".join(str(signed[key]) for key in sorted(signed)) + LAOHU_APP_KEY
+    signed["sign"] = hashlib.md5(raw.encode("utf-8")).hexdigest()
+    body = {key: value for key, value in signed.items() if keep_empty or value != ""}
+    payload = _request_json(
+        LAOHU_BASE_URL,
+        path,
+        method="POST",
+        body=body,
+        error_prefix="老虎账号",
+    )
+    if payload.get("code") not in {0, "0"}:
+        raise HsrApiError(payload.get("message") or "老虎账号接口返回错误。")
+    return payload.get("result") if payload.get("result") is not None else {}
+
+
+def _tajiduo_user_center_login(laohu_token: str, laohu_user_id: str, device_id: str) -> dict[str, Any]:
+    data = _tajiduo_extract(
+        _request_json(
+            TAJIDUO_BASE_URL,
+            "/usercenter/api/login",
+            method="POST",
+            body={
+                "token": laohu_token,
+                "userIdentity": str(laohu_user_id),
+                "appId": TAJIDUO_USER_CENTER_APP_ID,
+            },
+            headers=_tajiduo_headers(device_id, ""),
+            error_prefix="塔吉多",
+        ),
+        "/usercenter/api/login",
+    )
+    if not isinstance(data, dict):
+        raise HsrApiError("塔吉多登录返回格式异常。")
+    access_token = str(data.get("accessToken") or "")
+    refresh_token = str(data.get("refreshToken") or "")
+    center_uid = str(data.get("uid") or "")
+    if not access_token or not refresh_token or not center_uid:
+        raise HsrApiError("塔吉多登录返回缺少 token。")
+    return {
+        "provider": "tajiduo",
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "center_uid": center_uid,
+        "device_id": device_id,
+        "laohu_token": laohu_token,
+        "laohu_user_id": str(laohu_user_id),
+        "access_token_updated_at": int(time.time()),
+    }
+
+
+def _tajiduo_request(
+    account: dict[str, Any],
+    path: str,
+    query: dict[str, Any] | None = None,
+    body: dict[str, Any] | None = None,
+    method: str = "GET",
+) -> Any:
+    return _tajiduo_extract(
+        _request_json(
+            TAJIDUO_BASE_URL,
+            path,
+            method=method,
+            query=query,
+            body=body,
+            headers=_tajiduo_headers(
+                str(account.get("device_id") or make_nte_device_id()),
+                str(account.get("access_token") or ""),
+            ),
+            error_prefix="塔吉多",
+        ),
+        path,
+    )
+
+
+def _tajiduo_headers(device_id: str, authorization: str) -> dict[str, str]:
+    timestamp = str(int(time.time()))
+    nonce = "".join(random.choice(TAJIDUO_DS_NONCE_ALPHABET) for _ in range(8))
+    raw = f"{timestamp}{nonce}{TAJIDUO_APP_VERSION}{TAJIDUO_DS_SALT}"
+    return {
+        "User-Agent": "okhttp/4.12.0",
+        "platform": "android",
+        "deviceid": device_id,
+        "appversion": TAJIDUO_APP_VERSION,
+        "uid": TAJIDUO_CLIENT_UID,
+        "authorization": authorization,
+        "ds": f"{timestamp},{nonce},{hashlib.md5(raw.encode('utf-8')).hexdigest()}",
+    }
+
+
+def _tajiduo_extract(payload: dict[str, Any], path: str) -> Any:
+    if payload.get("code") not in {0, "0"}:
+        status = payload.get("code")
+        message = payload.get("msg") or payload.get("message") or "塔吉多接口返回错误。"
+        if str(status) in {"401", "402", "403"}:
+            message = f"{message}，塔吉多登录态可能已失效，请重新绑定异环。"
+        raise HsrApiError(f"[{path}] {message}")
+    return payload.get("data") if payload.get("data") is not None else {}
+
+
+def _request_json(
+    base_url: str,
+    path: str,
+    *,
+    method: str,
+    query: dict[str, Any] | None = None,
+    body: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    error_prefix: str,
+) -> dict[str, Any]:
+    request_url = f"{base_url}{path}"
+    if query:
+        request_url = f"{request_url}?{urlencode(sorted((key, str(value)) for key, value in query.items()))}"
+    data = urlencode(body).encode("utf-8") if body is not None else None
+    merged_headers = dict(headers or {})
+    if body is not None:
+        merged_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+    request = Request(request_url, data=data, headers=merged_headers, method=method)
+    try:
+        with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            text = response.read().decode("utf-8")
+    except HTTPError as exc:
+        raise HsrApiError(f"{error_prefix}接口返回 HTTP {exc.code}") from exc
+    except URLError as exc:
+        raise HsrApiError(f"连接{error_prefix}失败：{exc.reason}") from exc
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise HsrApiError(f"{error_prefix}接口返回非 JSON 内容。") from exc
+    if not isinstance(payload, dict):
+        raise HsrApiError(f"{error_prefix}接口返回格式异常。")
+    return payload
 
 
 def _headers(cookie: str, query: str) -> dict[str, str]:
@@ -676,6 +1112,29 @@ def _zzz_vitality(note: dict[str, Any]) -> tuple[int | None, int]:
     current = _first_int(vitality, "current", "cur_point", "current_progress", "value")
     max_count = _first_int(vitality, "max", "max_point", "total", "target") or 400
     return current, max_count
+
+
+def _zzz_energy(note: dict[str, Any]) -> tuple[int | None, int]:
+    energy = note.get("energy")
+    if not isinstance(energy, dict):
+        energy = note.get("battery")
+    if not isinstance(energy, dict):
+        energy = note.get("stamina")
+    if not isinstance(energy, dict):
+        energy = {}
+
+    current = _first_int(energy, "current", "cur", "value", "current_energy")
+    max_count = _first_int(energy, "max", "total", "limit", "max_energy") or 240
+    return current, max_count
+
+
+def _format_nte_role(role: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "game_uid": role.get("roleId") or role.get("role_id") or role.get("uid"),
+        "nickname": role.get("roleName") or role.get("role_name") or role.get("nickname"),
+        "level": role.get("lev") or role.get("level"),
+        "game_id": GAMES[GAME_KEY_NTE]["game_id"],
+    }
 
 
 def _zzz_card_sign_text(note: dict[str, Any]) -> str:
