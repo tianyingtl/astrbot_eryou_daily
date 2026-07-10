@@ -3,7 +3,7 @@
 <div align="center">
 
 ![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-blue)
-![Version](https://img.shields.io/badge/version-v1.0.5-green)
+![Version](https://img.shields.io/badge/version-v1.0.6-green)
 ![Platform](https://img.shields.io/badge/platform-QQ%20Group-lightgrey)
 
 二游每日状态检查插件。支持在 QQ 群/私聊中查询星铁、原神、绝区零、异环每日完成情况和体力状态，并为未完成的每日设置群内 at 提醒。
@@ -193,6 +193,12 @@ Linux/macOS 对应路径为：
 v1.0.5 起会保留。数据在 `%USERPROFILE%\.astrbot_eryou_daily\bindings.json`，不在插件目录里。卸载或覆盖安装插件不会删除这个文件。
 
 ## 更新日志
+
+### v1.0.6
+
+- 跟随塔吉多官网当前客户端，将接口协议版本更新为 `1.2.5`。
+- 塔吉多接口返回 HTTP `401`、`402` 或 `403` 时，自动刷新登录态并重试原请求一次。
+- 刷新后的 access token 和 refresh token 会继续写回绑定数据，避免下一次查询重复失败。
 
 ### v1.0.5
 

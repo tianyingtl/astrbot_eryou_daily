@@ -87,7 +87,7 @@ LAOHU_PACKAGE = "com.pwrd.htassistant"
 LAOHU_VERSION_CODE = 12
 TAJIDUO_BASE_URL = "https://bbs-api.tajiduo.com"
 TAJIDUO_USER_CENTER_APP_ID = "10551"
-TAJIDUO_APP_VERSION = "1.2.4"
+TAJIDUO_APP_VERSION = "1.2.5"
 TAJIDUO_CLIENT_UID = "0"
 TAJIDUO_DS_SALT = "pUds3dfMkl"
 TAJIDUO_DS_NONCE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
@@ -101,7 +101,9 @@ TIMEOUT_SECONDS = 8
 
 
 class HsrApiError(RuntimeError):
-    pass
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class BindingStore:
@@ -571,6 +573,12 @@ def ensure_tajiduo_account(account: dict[str, Any]) -> dict[str, Any]:
     if access_token and time.time() - updated_at < 3300:
         return account
 
+    return _refresh_tajiduo_account(account)
+
+
+def _refresh_tajiduo_account(account: dict[str, Any]) -> dict[str, Any]:
+    account = dict(account or {})
+
     refresh_token = str(account.get("refresh_token") or "")
     if not refresh_token:
         raise HsrApiError("塔吉多登录态已过期，请重新绑定异环。")
@@ -1018,21 +1026,33 @@ def _tajiduo_request(
     body: dict[str, Any] | None = None,
     method: str = "GET",
 ) -> Any:
-    return _tajiduo_extract(
-        _request_json(
-            TAJIDUO_BASE_URL,
-            path,
-            method=method,
-            query=query,
-            body=body,
-            headers=_tajiduo_headers(
-                str(account.get("device_id") or make_nte_device_id()),
-                str(account.get("access_token") or ""),
+    def request_once() -> Any:
+        return _tajiduo_extract(
+            _request_json(
+                TAJIDUO_BASE_URL,
+                path,
+                method=method,
+                query=query,
+                body=body,
+                headers=_tajiduo_headers(
+                    str(account.get("device_id") or make_nte_device_id()),
+                    str(account.get("access_token") or ""),
+                ),
+                error_prefix="塔吉多",
             ),
-            error_prefix="塔吉多",
-        ),
-        path,
-    )
+            path,
+        )
+
+    try:
+        return request_once()
+    except HsrApiError as exc:
+        if exc.status_code not in {401, 402, 403}:
+            raise
+
+    refreshed = _refresh_tajiduo_account(account)
+    account.clear()
+    account.update(refreshed)
+    return request_once()
 
 
 def _tajiduo_headers(device_id: str, authorization: str) -> dict[str, str]:
@@ -1053,10 +1073,14 @@ def _tajiduo_headers(device_id: str, authorization: str) -> dict[str, str]:
 def _tajiduo_extract(payload: dict[str, Any], path: str) -> Any:
     if payload.get("code") not in {0, "0"}:
         status = payload.get("code")
+        try:
+            status_code = int(status)
+        except (TypeError, ValueError):
+            status_code = None
         message = payload.get("msg") or payload.get("message") or "塔吉多接口返回错误。"
-        if str(status) in {"401", "402", "403"}:
+        if status_code in {401, 402, 403}:
             message = f"{message}，塔吉多登录态可能已失效，请重新绑定异环。"
-        raise HsrApiError(f"[{path}] {message}")
+        raise HsrApiError(f"[{path}] {message}", status_code=status_code)
     return payload.get("data") if payload.get("data") is not None else {}
 
 
@@ -1082,7 +1106,10 @@ def _request_json(
         with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             text = response.read().decode("utf-8")
     except HTTPError as exc:
-        raise HsrApiError(f"{error_prefix}接口返回 HTTP {exc.code}") from exc
+        raise HsrApiError(
+            f"{error_prefix}接口返回 HTTP {exc.code}",
+            status_code=int(exc.code),
+        ) from exc
     except URLError as exc:
         raise HsrApiError(f"连接{error_prefix}失败：{exc.reason}") from exc
     try:

@@ -2,6 +2,8 @@ import unittest
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 from hsr_daily import (
     BindingStore,
@@ -10,6 +12,10 @@ from hsr_daily import (
     GAME_KEY_NTE,
     GAME_KEY_ZZZ,
     HsrApiError,
+    TAJIDUO_APP_VERSION,
+    TAJIDUO_BASE_URL,
+    _request_json,
+    _tajiduo_request,
     format_game_menu,
     format_group_bind_guide,
     format_nte_bind_guide,
@@ -24,6 +30,83 @@ from hsr_daily import (
 
 
 class HsrDailyTest(unittest.TestCase):
+    def test_tajiduo_uses_current_official_app_version(self):
+        self.assertEqual(TAJIDUO_APP_VERSION, "1.2.5")
+
+    def test_tajiduo_http_error_keeps_status_code(self):
+        error = HTTPError("https://example.invalid", 402, "Payment Required", {}, None)
+
+        with patch("hsr_daily.urlopen", side_effect=error):
+            with self.assertRaises(HsrApiError) as raised:
+                _request_json(
+                    TAJIDUO_BASE_URL,
+                    "/usercenter/api/v2/getGameRoles",
+                    method="GET",
+                    error_prefix="塔吉多",
+                )
+
+        self.assertEqual(raised.exception.status_code, 402)
+
+    def test_tajiduo_402_refreshes_and_retries_once(self):
+        account = {
+            "access_token": "stale-access",
+            "refresh_token": "valid-refresh",
+            "device_id": "HT1",
+            "access_token_updated_at": 1,
+        }
+        refreshed = {
+            "code": 0,
+            "data": {"accessToken": "fresh-access", "refreshToken": "fresh-refresh"},
+        }
+        roles = {"code": 0, "data": {"roles": [{"roleId": "116771663"}]}}
+
+        with patch(
+            "hsr_daily._request_json",
+            side_effect=[HsrApiError("塔吉多接口返回 HTTP 402", status_code=402), refreshed, roles],
+        ) as request_json:
+            result = _tajiduo_request(
+                account,
+                "/usercenter/api/v2/getGameRoles",
+                query={"gameId": "1289"},
+            )
+
+        self.assertEqual(result, roles["data"])
+        self.assertEqual(account["access_token"], "fresh-access")
+        self.assertEqual(account["refresh_token"], "fresh-refresh")
+        self.assertEqual(request_json.call_count, 3)
+        self.assertEqual(request_json.call_args_list[0].kwargs["headers"]["authorization"], "stale-access")
+        self.assertEqual(request_json.call_args_list[1].kwargs["headers"]["authorization"], "valid-refresh")
+        self.assertEqual(request_json.call_args_list[2].kwargs["headers"]["authorization"], "fresh-access")
+
+    def test_tajiduo_second_402_is_not_retried_again(self):
+        account = {
+            "access_token": "stale-access",
+            "refresh_token": "valid-refresh",
+            "device_id": "HT1",
+        }
+        refreshed = {
+            "code": 0,
+            "data": {"accessToken": "fresh-access", "refreshToken": "fresh-refresh"},
+        }
+
+        with patch(
+            "hsr_daily._request_json",
+            side_effect=[
+                HsrApiError("塔吉多接口返回 HTTP 402", status_code=402),
+                refreshed,
+                HsrApiError("塔吉多接口返回 HTTP 402", status_code=402),
+            ],
+        ) as request_json:
+            with self.assertRaises(HsrApiError) as raised:
+                _tajiduo_request(
+                    account,
+                    "/usercenter/api/v2/getGameRoles",
+                    query={"gameId": "1289"},
+                )
+
+        self.assertEqual(raised.exception.status_code, 402)
+        self.assertEqual(request_json.call_count, 3)
+
     def test_parse_commission_command(self):
         self.assertEqual(parse_commission_command("/委托"), ("check", ""))
         self.assertEqual(parse_commission_command("/委托 原神"), ("check", GAME_KEY_GENSHIN))
