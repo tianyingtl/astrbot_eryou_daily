@@ -132,23 +132,19 @@ class EryouDailyPlugin(Star):
             if not is_supported_game(game_key):
                 reply = f"当前支持绑定：{supported_game_text()}。示例：/委托绑定 星铁"
             elif supports_tajiduo_login(game_key):
-                account = self.bindings.get_tajiduo_account(sender_key)
-                if account:
-                    reply = await self._bind_nte_from_account(sender_key, account, target_uid)
-                else:
-                    self.bindings.set_pending(
-                        sender_key,
-                        {
-                            "type": "nte_target",
-                            "game": GAME_KEY_NTE,
-                            "target_uid": target_uid,
-                            "created_at": int(time()),
-                        },
-                    )
-                    guide = format_nte_bind_guide()
-                    if target_uid:
-                        guide = f"已记录要绑定的异环 UID：{target_uid}\n" + guide
-                    reply = await self._private_reply(event, sender_key, guide)
+                self.bindings.set_pending(
+                    sender_key,
+                    {
+                        "type": "nte_target",
+                        "game": GAME_KEY_NTE,
+                        "target_uid": target_uid,
+                        "created_at": int(time()),
+                    },
+                )
+                guide = format_nte_bind_guide()
+                if target_uid:
+                    guide = f"已记录要绑定的异环 UID：{target_uid}\n" + guide
+                reply = await self._private_reply(event, sender_key, guide)
             elif self.bindings.get_account_cookie(sender_key):
                 cookie = self.bindings.get_account_cookie(sender_key)
                 reply = await self._bind_game_from_cookie(sender_key, game_key, cookie)
@@ -400,6 +396,8 @@ class EryouDailyPlugin(Star):
         try:
             account, roles = await asyncio.to_thread(get_nte_roles, account)
         except HsrApiError as exc:
+            if exc.status_code in {401, 402, 403}:
+                return "塔吉多登录态已失效，请重新发送 /委托绑定 异环 完成登录。"
             return f"读取塔吉多账号失败：{exc}"
         except Exception as exc:
             return f"读取塔吉多账号失败：{exc}"
@@ -515,6 +513,8 @@ class EryouDailyPlugin(Star):
                 binding["role"],
             )
         except HsrApiError as exc:
+            if exc.status_code in {401, 402, 403}:
+                return "塔吉多登录态已失效，请重新发送 /委托绑定 异环 完成登录。"
             return f"查询失败：{exc}"
         except Exception as exc:
             return f"查询失败：{exc}"

@@ -3,7 +3,7 @@
 <div align="center">
 
 ![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-blue)
-![Version](https://img.shields.io/badge/version-v1.0.6-green)
+![Version](https://img.shields.io/badge/version-v1.0.7-green)
 ![Platform](https://img.shields.io/badge/platform-QQ%20Group-lightgrey)
 
 二游每日状态检查插件。支持在 QQ 群/私聊中查询星铁、原神、绝区零、异环每日完成情况和体力状态，并为未完成的每日设置群内 at 提醒。
@@ -52,17 +52,6 @@ pip install -r requirements.txt
 
 3. 在 AstrBot WebUI 中重载插件。
 4. 发送 `/委托帮助`，确认插件正常响应。
-
-### 添加专用插件源
-
-在 AstrBot 插件市场的“添加插件源”窗口中填写：
-
-```text
-源名称：二游每日插件源
-源地址：https://raw.githubusercontent.com/tianyingtl/astrbot_eryou_daily/master/plugin-source.json
-```
-
-保存并刷新插件市场后，这个源中只会显示“二游每日检查”一个插件。
 
 ## 使用方法
 
@@ -204,6 +193,12 @@ Linux/macOS 对应路径为：
 v1.0.5 起会保留。数据在 `%USERPROFILE%\.astrbot_eryou_daily\bindings.json`，不在插件目录里。卸载或覆盖安装插件不会删除这个文件。
 
 ## 更新日志
+
+### v1.0.7
+
+- `/委托绑定 异环` 不再读取可能失效的旧塔吉多登录态，改为直接私聊发送重新登录教程。
+- `/委托绑定 异环 UID` 会保留指定 UID，并在短信登录成功后绑定对应角色。
+- 异环查询遇到登录态失效时，会明确提示重新绑定，不再只显示 HTTP 402。
 
 ### v1.0.6
 
