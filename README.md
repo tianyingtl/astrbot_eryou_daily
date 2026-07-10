@@ -53,6 +53,17 @@ pip install -r requirements.txt
 3. 在 AstrBot WebUI 中重载插件。
 4. 发送 `/委托帮助`，确认插件正常响应。
 
+### 添加专用插件源
+
+在 AstrBot 插件市场的“添加插件源”窗口中填写：
+
+```text
+源名称：二游每日插件源
+源地址：https://raw.githubusercontent.com/tianyingtl/astrbot_eryou_daily/master/plugin-source.json
+```
+
+保存并刷新插件市场后，这个源中只会显示“二游每日检查”一个插件。
+
 ## 使用方法
 
 ### 绑定账号

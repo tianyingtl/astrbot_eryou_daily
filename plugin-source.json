@@ -1,0 +1,18 @@
+{
+  "astrbot_eryou_daily": {
+    "name": "astrbot_eryou_daily",
+    "market_plugin_id": "tianyingtl/astrbot_eryou_daily",
+    "display_name": "二游每日检查",
+    "desc": "检查星铁、原神、绝区零和异环的每日完成状态与体力，并支持群内定时提醒。",
+    "author": "tianying",
+    "repo": "https://github.com/tianyingtl/astrbot_eryou_daily",
+    "tags": [
+      "每日任务",
+      "体力",
+      "游戏",
+      "提醒"
+    ],
+    "social_link": "https://github.com/tianyingtl/astrbot_eryou_daily",
+    "version": "v1.0.6"
+  }
+}
