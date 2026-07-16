@@ -30,5 +30,37 @@
     ],
     "social_link": "https://github.com/tianyingtl/astrbot_plugin_image2_draw",
     "version": "v1.0.4"
+  },
+  "astrbot_plugin_dlut_xingce": {
+    "name": "astrbot_plugin_dlut_xingce",
+    "market_plugin_id": "tianyingtl/astrbot_plugin_dlut_xingce",
+    "display_name": "大工形策查询",
+    "desc": "查询大连理工大学开发区校区近期形势与政策开课公告。",
+    "author": "tianying",
+    "repo": "https://github.com/tianyingtl/astrbot_plugin_dlut_xingce",
+    "tags": [
+      "大连理工大学",
+      "校园",
+      "公告",
+      "形策"
+    ],
+    "social_link": "https://github.com/tianyingtl/astrbot_plugin_dlut_xingce",
+    "version": "v1.0.0"
+  },
+  "astrbot_plugin_reminder": {
+    "name": "astrbot_plugin_reminder",
+    "market_plugin_id": "tianyingtl/astrbot_plugin_reminder",
+    "display_name": "群提醒",
+    "desc": "在 QQ 群里设置一次性 @ 提醒，支持完整日期、明天和当天时间。",
+    "author": "tianying",
+    "repo": "https://github.com/tianyingtl/astrbot_plugin_reminder",
+    "tags": [
+      "提醒",
+      "群聊",
+      "QQ",
+      "效率"
+    ],
+    "social_link": "https://github.com/tianyingtl/astrbot_plugin_reminder",
+    "version": "v1.0.0"
   }
 }
