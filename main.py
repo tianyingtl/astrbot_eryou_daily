@@ -394,7 +394,11 @@ class EryouDailyPlugin(Star):
 
     async def _bind_nte_from_account(self, sender_key: str, account: dict, target_uid: str = "") -> str:
         try:
-            account, roles = await asyncio.to_thread(get_nte_roles, account)
+            account, roles = await asyncio.to_thread(
+                get_nte_roles,
+                account,
+                self._tajiduo_saver(sender_key),
+            )
         except HsrApiError as exc:
             if exc.status_code in {401, 402, 403}:
                 return "塔吉多登录态已失效，请重新发送 /委托绑定 异环 完成登录。"
@@ -511,6 +515,7 @@ class EryouDailyPlugin(Star):
                 fetch_nte_daily_note,
                 account,
                 binding["role"],
+                self._tajiduo_saver(sender_key),
             )
         except HsrApiError as exc:
             if exc.status_code in {401, 402, 403}:
@@ -521,6 +526,15 @@ class EryouDailyPlugin(Star):
 
         self.bindings.set_tajiduo_account(sender_key, account)
         return format_note_status(GAME_KEY_NTE, binding["role"], note)
+
+    def _tajiduo_saver(self, sender_key: str):
+        """token 刷新成功后立即落盘的回调；塔吉多 refresh token 轮换后旧 token 作废，
+        等到查询结束再保存的话，中途失败会永久丢失登录态。"""
+
+        def save(account: dict) -> None:
+            self.bindings.set_tajiduo_account(sender_key, account)
+
+        return save
 
     async def _reminder_loop(self) -> None:
         while True:
@@ -562,7 +576,12 @@ class EryouDailyPlugin(Star):
                     if not account:
                         self.bindings.mark_reminded(sender_key, group_id, game_key, today)
                         continue
-                    account, note = await asyncio.to_thread(fetch_nte_daily_note, account, binding["role"])
+                    account, note = await asyncio.to_thread(
+                        fetch_nte_daily_note,
+                        account,
+                        binding["role"],
+                        self._tajiduo_saver(sender_key),
+                    )
                     self.bindings.set_tajiduo_account(sender_key, account)
                 else:
                     cookie = self.bindings.get_account_cookie(sender_key)

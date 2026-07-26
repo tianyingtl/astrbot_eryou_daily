@@ -1,5 +1,6 @@
 import unittest
 import json
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -16,6 +17,7 @@ from hsr_daily import (
     TAJIDUO_BASE_URL,
     _request_json,
     _tajiduo_request,
+    fetch_nte_daily_note,
     format_game_menu,
     format_group_bind_guide,
     format_nte_bind_guide,
@@ -30,8 +32,9 @@ from hsr_daily import (
 
 
 class HsrDailyTest(unittest.TestCase):
-    def test_tajiduo_uses_current_official_app_version(self):
-        self.assertEqual(TAJIDUO_APP_VERSION, "1.2.5")
+    def test_tajiduo_matches_reference_android_app_version(self):
+        # 必须与安卓 App 抓包协议（NTEUID 参考实现）一致；官网 Web 版本号不通用
+        self.assertEqual(TAJIDUO_APP_VERSION, "1.2.4")
 
     def test_tajiduo_http_error_keeps_status_code(self):
         error = HTTPError("https://example.invalid", 402, "Payment Required", {}, None)
@@ -106,6 +109,70 @@ class HsrDailyTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 402)
         self.assertEqual(request_json.call_count, 3)
+
+    def test_fetch_nte_daily_note_sends_only_role_id(self):
+        account = {
+            "access_token": "fresh",
+            "refresh_token": "r",
+            "device_id": "HT1",
+            "access_token_updated_at": int(time.time()),
+        }
+        payload = {"code": 0, "data": {"roleid": "116771663", "staminaValue": 100}}
+
+        with patch("hsr_daily._request_json", return_value=payload) as request_json:
+            _, note = fetch_nte_daily_note(account, {"game_uid": "116771663"})
+
+        self.assertEqual(request_json.call_args.kwargs["query"], {"roleId": "116771663"})
+        self.assertEqual(note["staminaValue"], 100)
+
+    def test_dead_refresh_token_falls_back_to_laohu_relogin(self):
+        account = {
+            "access_token": "stale",
+            "refresh_token": "dead",
+            "device_id": "HT1",
+            "laohu_token": "laohu-token",
+            "laohu_user_id": "42",
+            "access_token_updated_at": 1,
+        }
+        login_ok = {"code": 0, "data": {"accessToken": "new-a", "refreshToken": "new-r", "uid": "9"}}
+        role_home = {"code": 0, "data": {"staminaValue": 1}}
+        saved = []
+
+        with patch(
+            "hsr_daily._request_json",
+            side_effect=[
+                HsrApiError("塔吉多接口返回 HTTP 402", status_code=402),
+                login_ok,
+                role_home,
+            ],
+        ):
+            account, note = fetch_nte_daily_note(account, {"game_uid": "116771663"}, saved.append)
+
+        self.assertEqual(account["access_token"], "new-a")
+        self.assertEqual(account["refresh_token"], "new-r")
+        self.assertEqual(account["laohu_token"], "laohu-token")
+        self.assertEqual(saved[-1]["refresh_token"], "new-r")
+        self.assertEqual(note, {"staminaValue": 1})
+
+    def test_tokens_persist_even_when_note_fetch_fails_after_refresh(self):
+        account = {
+            "access_token": "stale",
+            "refresh_token": "ok",
+            "device_id": "HT1",
+            "access_token_updated_at": 1,
+        }
+        refreshed = {"code": 0, "data": {"accessToken": "fresh-a", "refreshToken": "fresh-r"}}
+        saved = []
+
+        with patch(
+            "hsr_daily._request_json",
+            side_effect=[refreshed, HsrApiError("连接塔吉多失败：timeout")],
+        ):
+            with self.assertRaises(HsrApiError):
+                fetch_nte_daily_note(account, {"game_uid": "116771663"}, saved.append)
+
+        self.assertEqual(saved[-1]["access_token"], "fresh-a")
+        self.assertEqual(saved[-1]["refresh_token"], "fresh-r")
 
     def test_parse_commission_command(self):
         self.assertEqual(parse_commission_command("/委托"), ("check", ""))
@@ -219,6 +286,25 @@ class HsrDailyTest(unittest.TestCase):
         self.assertIn("都市活力：60/100", text)
         self.assertIn("活跃度：100/100，已完成", text)
         self.assertNotIn("今日活跃", text)
+
+    def test_format_nte_status_reads_fields_case_insensitively(self):
+        role = {"nickname": "塔吉多", "game_uid": "116771663"}
+        note = {
+            "roleId": "116771663",
+            "roleName": "塔吉多",
+            "StaminaValue": 160,
+            "staminamaxvalue": 240,
+            "cityStaminaValue": 60,
+            "cityStaminaMaxValue": 100,
+            "dayValue": 80,
+        }
+
+        text = format_note_status(GAME_KEY_NTE, role, note)
+
+        self.assertIn("本性像素：160/240", text)
+        self.assertIn("都市活力：60/100", text)
+        self.assertIn("活跃度：80/100，未完成", text)
+        self.assertNotIn("和绑定 UID 不一致", text)
 
     def test_nte_reminder_reasons(self):
         note = {"dayvalue": 80, "citystaminaValue": 10, "citystaminaMaxValue": 100}

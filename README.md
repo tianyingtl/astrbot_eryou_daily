@@ -3,7 +3,7 @@
 <div align="center">
 
 ![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-blue)
-![Version](https://img.shields.io/badge/version-v1.0.7-green)
+![Version](https://img.shields.io/badge/version-v1.0.8-green)
 ![Platform](https://img.shields.io/badge/platform-QQ%20Group-lightgrey)
 
 二游每日状态检查插件。支持在 QQ 群/私聊中查询星铁、原神、绝区零、异环每日完成情况和体力状态，并为未完成的每日设置群内 at 提醒。
@@ -193,6 +193,13 @@ Linux/macOS 对应路径为：
 v1.0.5 起会保留。数据在 `%USERPROFILE%\.astrbot_eryou_daily\bindings.json`，不在插件目录里。卸载或覆盖安装插件不会删除这个文件。
 
 ## 更新日志
+
+### v1.0.8
+
+- 修复异环体力（本性像素）和都市活力读取异常：接口协议版本回退到与安卓 App 一致的 `1.2.4`，并与参考实现 NTEUID 对齐。
+- 塔吉多 token 刷新成功后立即落盘，查询中途失败不再丢失登录态。
+- refresh token 失效时自动用老虎账号凭据重新登录，大幅减少“请重新绑定异环”。
+- token 刷新与绑定文件读写加锁，避免提醒任务和手动查询并发时刷废登录态。
 
 ### v1.0.7
 

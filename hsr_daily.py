@@ -5,6 +5,7 @@ import json
 import random
 import re
 import shutil
+import threading
 import time
 import uuid
 from base64 import b64encode
@@ -87,7 +88,8 @@ LAOHU_PACKAGE = "com.pwrd.htassistant"
 LAOHU_VERSION_CODE = 12
 TAJIDUO_BASE_URL = "https://bbs-api.tajiduo.com"
 TAJIDUO_USER_CENTER_APP_ID = "10551"
-TAJIDUO_APP_VERSION = "1.2.5"
+# 必须与安卓 App 抓包协议（参考实现 NTEUID）一致；官网 Web 客户端的版本号不通用
+TAJIDUO_APP_VERSION = "1.2.4"
 TAJIDUO_CLIENT_UID = "0"
 TAJIDUO_DS_SALT = "pUds3dfMkl"
 TAJIDUO_DS_NONCE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
@@ -109,6 +111,9 @@ class HsrApiError(RuntimeError):
 class BindingStore:
     def __init__(self, path: Path):
         self.path = path
+        # token 刷新回调在 asyncio.to_thread 的工作线程里落盘，
+        # 和事件循环线程的读改写需要互斥
+        self._lock = threading.RLock()
 
     def get_account_cookie(self, sender_key: str) -> str | None:
         user = self._get_user(sender_key)
@@ -118,11 +123,12 @@ class BindingStore:
         return str(cookie) if cookie else None
 
     def set_account_cookie(self, sender_key: str, cookie: str) -> None:
-        data = self._load()
-        user = data.setdefault("users", {}).setdefault(sender_key, {})
-        user.setdefault("accounts", {})["mihoyo"] = {"provider": "mihoyo", "cookie": cookie}
-        user["account"] = {"provider": "mihoyo", "cookie": cookie}
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            user = data.setdefault("users", {}).setdefault(sender_key, {})
+            user.setdefault("accounts", {})["mihoyo"] = {"provider": "mihoyo", "cookie": cookie}
+            user["account"] = {"provider": "mihoyo", "cookie": cookie}
+            self._save(data)
 
     def get_tajiduo_account(self, sender_key: str) -> dict[str, Any] | None:
         user = self._get_user(sender_key)
@@ -133,21 +139,23 @@ class BindingStore:
         return dict(account) if account else None
 
     def set_tajiduo_account(self, sender_key: str, account: dict[str, Any]) -> None:
-        data = self._load()
-        user = data.setdefault("users", {}).setdefault(sender_key, {})
-        saved = dict(account)
-        saved["provider"] = "tajiduo"
-        user.setdefault("accounts", {})["tajiduo"] = saved
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            user = data.setdefault("users", {}).setdefault(sender_key, {})
+            saved = dict(account)
+            saved["provider"] = "tajiduo"
+            user.setdefault("accounts", {})["tajiduo"] = saved
+            self._save(data)
 
     def set_tajiduo_binding(self, sender_key: str, account: dict[str, Any], role: dict[str, Any]) -> None:
-        data = self._load()
-        user = data.setdefault("users", {}).setdefault(sender_key, {})
-        saved = dict(account)
-        saved["provider"] = "tajiduo"
-        user.setdefault("accounts", {})["tajiduo"] = saved
-        user.setdefault("games", {})[GAME_KEY_NTE] = {"role": role}
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            user = data.setdefault("users", {}).setdefault(sender_key, {})
+            saved = dict(account)
+            saved["provider"] = "tajiduo"
+            user.setdefault("accounts", {})["tajiduo"] = saved
+            user.setdefault("games", {})[GAME_KEY_NTE] = {"role": role}
+            self._save(data)
 
     def get_game_binding(self, sender_key: str, game_key: str) -> dict[str, Any] | None:
         return self._get_user(sender_key).get("games", {}).get(game_key)
@@ -156,10 +164,11 @@ class BindingStore:
         return self._get_user(sender_key).get("games", {})
 
     def set_game_binding(self, sender_key: str, game_key: str, role: dict[str, Any]) -> None:
-        data = self._load()
-        user = data.setdefault("users", {}).setdefault(sender_key, {})
-        user.setdefault("games", {})[game_key] = {"role": role}
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            user = data.setdefault("users", {}).setdefault(sender_key, {})
+            user.setdefault("games", {})[game_key] = {"role": role}
+            self._save(data)
 
     def get_reminders(self) -> list[tuple[str, dict[str, Any]]]:
         data = self._load()
@@ -178,25 +187,26 @@ class BindingStore:
         reminder_time: str,
         last_reminded_date: str = "",
     ) -> None:
-        data = self._load()
-        user = data.setdefault("users", {}).setdefault(sender_key, {})
-        reminders = user.setdefault("reminders", [])
-        new_reminder = {
-            "group_id": str(group_id),
-            "group_umo": group_umo,
-            "game": game_key,
-            "time": reminder_time,
-            "last_reminded_date": last_reminded_date,
-        }
-        for index, reminder in enumerate(reminders):
-            if reminder.get("group_id") == str(group_id) and reminder.get("game") == game_key:
-                if not last_reminded_date:
-                    new_reminder["last_reminded_date"] = reminder.get("last_reminded_date", "")
-                reminders[index] = new_reminder
-                break
-        else:
-            reminders.append(new_reminder)
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            user = data.setdefault("users", {}).setdefault(sender_key, {})
+            reminders = user.setdefault("reminders", [])
+            new_reminder = {
+                "group_id": str(group_id),
+                "group_umo": group_umo,
+                "game": game_key,
+                "time": reminder_time,
+                "last_reminded_date": last_reminded_date,
+            }
+            for index, reminder in enumerate(reminders):
+                if reminder.get("group_id") == str(group_id) and reminder.get("game") == game_key:
+                    if not last_reminded_date:
+                        new_reminder["last_reminded_date"] = reminder.get("last_reminded_date", "")
+                    reminders[index] = new_reminder
+                    break
+            else:
+                reminders.append(new_reminder)
+            self._save(data)
 
     def mark_reminded(
         self,
@@ -205,41 +215,45 @@ class BindingStore:
         game_key: str,
         reminder_date: str,
     ) -> None:
-        data = self._load()
-        reminders = data.setdefault("users", {}).setdefault(sender_key, {}).setdefault("reminders", [])
-        for reminder in reminders:
-            if reminder.get("group_id") == str(group_id) and reminder.get("game") == game_key:
-                reminder["last_reminded_date"] = reminder_date
-                break
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            reminders = data.setdefault("users", {}).setdefault(sender_key, {}).setdefault("reminders", [])
+            for reminder in reminders:
+                if reminder.get("group_id") == str(group_id) and reminder.get("game") == game_key:
+                    reminder["last_reminded_date"] = reminder_date
+                    break
+            self._save(data)
 
     def delete_user(self, sender_key: str) -> bool:
-        data = self._load()
-        existed = False
-        if sender_key in data.get("users", {}):
-            del data["users"][sender_key]
-            existed = True
-        if sender_key in data.get("bindings", {}):
-            del data["bindings"][sender_key]
-            existed = True
-        if existed:
-            self._save(data)
-        return existed
+        with self._lock:
+            data = self._load()
+            existed = False
+            if sender_key in data.get("users", {}):
+                del data["users"][sender_key]
+                existed = True
+            if sender_key in data.get("bindings", {}):
+                del data["bindings"][sender_key]
+                existed = True
+            if existed:
+                self._save(data)
+            return existed
 
     def get_pending(self, sender_key: str) -> dict[str, Any] | None:
         return self._get_user(sender_key).get("pending")
 
     def set_pending(self, sender_key: str, pending: dict[str, Any]) -> None:
-        data = self._load()
-        user = data.setdefault("users", {}).setdefault(sender_key, {})
-        user["pending"] = pending
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            user = data.setdefault("users", {}).setdefault(sender_key, {})
+            user["pending"] = pending
+            self._save(data)
 
     def delete_pending(self, sender_key: str) -> None:
-        data = self._load()
-        user = data.setdefault("users", {}).setdefault(sender_key, {})
-        user.pop("pending", None)
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            user = data.setdefault("users", {}).setdefault(sender_key, {})
+            user.pop("pending", None)
+            self._save(data)
 
     def _get_user(self, sender_key: str) -> dict[str, Any]:
         data = self._load()
@@ -256,15 +270,17 @@ class BindingStore:
         return {}
 
     def _load(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {"users": {}}
-        with self.path.open("r", encoding="utf-8") as file:
-            return json.load(file)
+        with self._lock:
+            if not self.path.exists():
+                return {"users": {}}
+            with self.path.open("r", encoding="utf-8") as file:
+                return json.load(file)
 
     def _save(self, data: dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("w", encoding="utf-8") as file:
-            json.dump(data, file, ensure_ascii=False, indent=2)
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("w", encoding="utf-8") as file:
+                json.dump(data, file, ensure_ascii=False, indent=2)
 
 
 def resolve_binding_path(plugin_dir: Path, home_dir: Path | None = None) -> Path:
@@ -516,13 +532,17 @@ def bind_nte_by_sms(
     return account, role
 
 
-def get_nte_roles(account: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    account = ensure_tajiduo_account(account)
+def get_nte_roles(
+    account: dict[str, Any],
+    on_update=None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    account = ensure_tajiduo_account(account, on_update)
     game_id = GAMES[GAME_KEY_NTE]["game_id"]
     data = _tajiduo_request(
         account,
         "/usercenter/api/v2/getGameRoles",
         query={"gameId": game_id},
+        on_update=on_update,
     )
 
     if isinstance(data, list):
@@ -540,10 +560,12 @@ def get_nte_roles(account: dict[str, Any]) -> tuple[dict[str, Any], list[dict[st
         account,
         "/apihub/api/getGameBindRole",
         query={"uid": account.get("center_uid", ""), "gameId": game_id},
+        on_update=on_update,
     )
     if isinstance(bind_role, dict):
         role = _format_nte_role(bind_role)
-        if role.get("game_uid"):
+        # getGameBindRole 用 roleId=0 表示未绑定
+        if role.get("game_uid") and str(role["game_uid"]) != "0":
             roles.append(role)
     return account, roles
 
@@ -551,58 +573,103 @@ def get_nte_roles(account: dict[str, Any]) -> tuple[dict[str, Any], list[dict[st
 def fetch_nte_daily_note(
     account: dict[str, Any],
     role: dict[str, Any],
+    on_update=None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     role_id = role.get("game_uid") or role.get("uid") or role.get("role_id")
     if not role_id:
         raise HsrApiError("绑定的异环角色信息不完整，请重新绑定。")
-    account = ensure_tajiduo_account(account)
+    account = ensure_tajiduo_account(account, on_update)
     note = _tajiduo_request(
         account,
         "/apihub/awapi/yh/roleHome",
-        query={"roleId": str(role_id), "_t": int(time.time())},
+        query={"roleId": str(role_id)},
+        on_update=on_update,
     )
     if not isinstance(note, dict):
         raise HsrApiError("异环接口返回格式异常。")
     return account, note
 
 
-def ensure_tajiduo_account(account: dict[str, Any]) -> dict[str, Any]:
+def ensure_tajiduo_account(account: dict[str, Any], on_update=None) -> dict[str, Any]:
     account = dict(account or {})
     access_token = str(account.get("access_token") or "")
     updated_at = int(account.get("access_token_updated_at") or 0)
     if access_token and time.time() - updated_at < 3300:
         return account
 
-    return _refresh_tajiduo_account(account)
+    return _refresh_tajiduo_account(account, on_update)
 
 
-def _refresh_tajiduo_account(account: dict[str, Any]) -> dict[str, Any]:
-    account = dict(account or {})
+# 塔吉多 refreshToken 是轮换式的（旧 token 用一次即作废），刷新必须串行，
+# 否则提醒任务和手动查询并发时会把登录态刷废
+_TAJIDUO_REFRESH_LOCK = threading.Lock()
 
+
+def _refresh_tajiduo_account(account: dict[str, Any], on_update=None) -> dict[str, Any]:
+    with _TAJIDUO_REFRESH_LOCK:
+        account = dict(account or {})
+        device_id = str(account.get("device_id") or make_nte_device_id())
+
+        refreshed = _tajiduo_refresh_by_token(account, device_id)
+        if refreshed is None:
+            refreshed = _tajiduo_relogin_by_laohu(account, device_id)
+
+        account.update(refreshed)
+        account["device_id"] = device_id
+        account["access_token_updated_at"] = int(time.time())
+        # 新 token 立即写回：轮换后旧 refresh token 已作废，
+        # 后续请求失败时不落盘就会永久丢失登录态
+        if on_update is not None:
+            on_update(dict(account))
+        return account
+
+
+def _tajiduo_refresh_by_token(account: dict[str, Any], device_id: str) -> dict[str, Any] | None:
     refresh_token = str(account.get("refresh_token") or "")
     if not refresh_token:
-        raise HsrApiError("塔吉多登录态已过期，请重新绑定异环。")
+        return None
 
-    headers = _tajiduo_headers(str(account.get("device_id") or make_nte_device_id()), refresh_token)
-    data = _tajiduo_extract(
-        _request_json(
-            TAJIDUO_BASE_URL,
+    headers = _tajiduo_headers(device_id, refresh_token)
+    try:
+        data = _tajiduo_extract(
+            _request_json(
+                TAJIDUO_BASE_URL,
+                "/usercenter/api/refreshToken",
+                method="POST",
+                headers=headers,
+                error_prefix="塔吉多",
+            ),
             "/usercenter/api/refreshToken",
-            method="POST",
-            headers=headers,
-            error_prefix="塔吉多",
-        ),
-        "/usercenter/api/refreshToken",
-    )
+        )
+    except HsrApiError as exc:
+        if exc.status_code in {401, 402, 403}:
+            return None
+        raise
+
     access_token = str(data.get("accessToken") or "") if isinstance(data, dict) else ""
     new_refresh = str(data.get("refreshToken") or "") if isinstance(data, dict) else ""
     if not access_token or not new_refresh:
-        raise HsrApiError("塔吉多刷新登录态失败，请重新绑定异环。")
+        return None
+    return {"access_token": access_token, "refresh_token": new_refresh}
 
-    account["access_token"] = access_token
-    account["refresh_token"] = new_refresh
-    account["access_token_updated_at"] = int(time.time())
-    return account
+
+def _tajiduo_relogin_by_laohu(account: dict[str, Any], device_id: str) -> dict[str, Any]:
+    """refresh token 失效（例如被手机上的塔吉多 App 顶下线）时，
+    用绑定时保存的老虎账号凭据重走一遍用户中心登录续命。"""
+    laohu_token = str(account.get("laohu_token") or "")
+    laohu_user_id = str(account.get("laohu_user_id") or "")
+    if not laohu_token or not laohu_user_id:
+        raise HsrApiError("塔吉多登录态已失效，请重新绑定异环。", status_code=401)
+
+    try:
+        return _tajiduo_user_center_login(laohu_token, laohu_user_id, device_id)
+    except HsrApiError as exc:
+        if str(exc).startswith("连接"):
+            raise
+        raise HsrApiError(
+            "塔吉多登录态已失效，请重新绑定异环。",
+            status_code=exc.status_code or 401,
+        ) from exc
 
 
 def get_game_roles(cookie: str, game_key: str) -> list[dict[str, Any]]:
@@ -803,14 +870,14 @@ def _format_zzz_status(role: dict[str, Any], note: dict[str, Any]) -> str:
 def _format_nte_status(role: dict[str, Any], note: dict[str, Any]) -> str:
     bound_name = role.get("nickname") or "未知角色"
     bound_uid = str(role.get("game_uid") or role.get("uid") or "未知 UID")
-    nickname = note.get("rolename") or bound_name
-    uid = str(note.get("roleid") or bound_uid)
+    nickname = _nte_value(note, "rolename") or bound_name
+    uid = str(_nte_value(note, "roleid") or bound_uid)
 
-    stamina = _first_int(note, "staminaValue")
-    max_stamina = _first_int(note, "staminaMaxValue") or 240
-    city_stamina = _first_int(note, "citystaminaValue")
-    max_city_stamina = _first_int(note, "citystaminaMaxValue") or 100
-    day_value = _first_int(note, "dayvalue")
+    stamina = _nte_int(note, "staminaValue")
+    max_stamina = _nte_int(note, "staminaMaxValue") or 240
+    city_stamina = _nte_int(note, "citystaminaValue")
+    max_city_stamina = _nte_int(note, "citystaminaMaxValue") or 100
+    day_value = _nte_int(note, "dayvalue")
     done = is_nte_done(note)
 
     lines = [
@@ -852,19 +919,19 @@ def is_zzz_done(note: dict[str, Any]) -> bool:
 
 
 def is_nte_done(note: dict[str, Any]) -> bool:
-    day_value = _first_int(note, "dayvalue")
+    day_value = _nte_int(note, "dayvalue")
     return day_value is not None and day_value >= 100
 
 
 def nte_reminder_reasons(note: dict[str, Any], check_city_stamina: bool = False) -> list[str]:
     reasons = []
-    day_value = _first_int(note, "dayvalue")
+    day_value = _nte_int(note, "dayvalue")
     if day_value is None or day_value < 100:
         reasons.append(f"活跃度还没到 100（当前 {_score_text(day_value)}/100）")
 
     if check_city_stamina:
-        city_stamina = _first_int(note, "citystaminaValue")
-        max_city_stamina = _first_int(note, "citystaminaMaxValue") or 100
+        city_stamina = _nte_int(note, "citystaminaValue")
+        max_city_stamina = _nte_int(note, "citystaminaMaxValue") or 100
         if city_stamina is not None and city_stamina > 0:
             reasons.append(f"都市活力还没清完（当前 {city_stamina}/{max_city_stamina}）")
     return reasons
@@ -1025,6 +1092,7 @@ def _tajiduo_request(
     query: dict[str, Any] | None = None,
     body: dict[str, Any] | None = None,
     method: str = "GET",
+    on_update=None,
 ) -> Any:
     def request_once() -> Any:
         return _tajiduo_extract(
@@ -1049,7 +1117,7 @@ def _tajiduo_request(
         if exc.status_code not in {401, 402, 403}:
             raise
 
-    refreshed = _refresh_tajiduo_account(account)
+    refreshed = _refresh_tajiduo_account(account, on_update)
     account.clear()
     account.update(refreshed)
     return request_once()
@@ -1195,6 +1263,26 @@ def _cookie_from_set_cookie(lines: list[str]) -> str:
         if first_part and "=" in first_part:
             cookies.append(first_part)
     return "; ".join(cookies)
+
+
+def _nte_value(note: dict[str, Any], key: str) -> Any:
+    """roleHome 字段读取：先精确匹配，再按大小写不敏感兜底
+    （塔吉多接口的字段大小写风格不统一，例如 dayvalue / citystaminaValue）。"""
+    if key in note:
+        return note[key]
+    lowered_key = key.lower()
+    for name, value in note.items():
+        if str(name).lower() == lowered_key:
+            return value
+    return None
+
+
+def _nte_int(note: dict[str, Any], key: str) -> int | None:
+    value = _nte_value(note, key)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _first_int(data: dict[str, Any], *keys: str) -> int | None:
