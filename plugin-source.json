@@ -62,5 +62,21 @@
     ],
     "social_link": "https://github.com/tianyingtl/astrbot_plugin_reminder",
     "version": "v1.0.0"
+  },
+  "astrbot_plugin_hltv": {
+    "name": "astrbot_plugin_hltv",
+    "market_plugin_id": "tianyingtl/astrbot_plugin_hltv",
+    "display_name": "HLTV 查询",
+    "desc": "查询 CS2 今日赛程、近期大赛、赛果、战队排名与任意战队/选手信息，支持星级过滤与中文指令。",
+    "author": "tianying",
+    "repo": "https://github.com/tianyingtl/astrbot_plugin_hltv",
+    "tags": [
+      "CS2",
+      "HLTV",
+      "电竞",
+      "赛程"
+    ],
+    "social_link": "https://github.com/tianyingtl/astrbot_plugin_hltv",
+    "version": "v1.0.0"
   }
 }
