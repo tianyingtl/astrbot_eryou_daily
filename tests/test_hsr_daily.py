@@ -19,6 +19,8 @@ from hsr_daily import (
     _tajiduo_request,
     fetch_nte_daily_note,
     format_game_menu,
+    format_nte_debug,
+    get_nte_roles,
     format_group_bind_guide,
     format_nte_bind_guide,
     format_note_status,
@@ -190,6 +192,8 @@ class HsrDailyTest(unittest.TestCase):
         self.assertEqual(parse_commission_command("/委托扫码"), ("qr", ""))
         self.assertEqual(parse_commission_command("/委托确认"), ("confirm", ""))
         self.assertEqual(parse_commission_command("/委托确认 123456"), ("confirm", "123456"))
+        self.assertEqual(parse_commission_command("/委托调试 异环"), ("debug", GAME_KEY_NTE))
+        self.assertEqual(parse_commission_command("/委托调试"), ("debug", ""))
         self.assertEqual(parse_commission_command("/委托设置 星铁 20:00"), ("reminder_set", "星铁 20:00"))
         self.assertEqual(parse_commission_command("/委托解绑"), ("unbind", ""))
         self.assertIsNone(parse_commission_command("普通消息"))
@@ -305,6 +309,63 @@ class HsrDailyTest(unittest.TestCase):
         self.assertIn("都市活力：60/100", text)
         self.assertIn("活跃度：80/100，未完成", text)
         self.assertNotIn("和绑定 UID 不一致", text)
+
+    def test_get_nte_roles_sets_main_bind_role_when_missing(self):
+        account = {
+            "access_token": "fresh",
+            "refresh_token": "r",
+            "device_id": "HT1",
+            "access_token_updated_at": int(time.time()),
+        }
+        roles_payload = {"code": 0, "data": {"bindRole": 0, "roles": [{"roleId": "116771663"}]}}
+        bind_ok = {"code": 0, "data": True}
+
+        with patch("hsr_daily._request_json", side_effect=[roles_payload, bind_ok]) as request_json:
+            _, roles = get_nte_roles(account)
+
+        self.assertEqual(roles[0]["game_uid"], "116771663")
+        self.assertEqual(request_json.call_count, 2)
+        bind_call = request_json.call_args_list[1]
+        self.assertIn("bindGameRole", bind_call.args[1])
+        self.assertEqual(bind_call.kwargs["body"], {"gameId": "1289", "roleId": "116771663"})
+
+    def test_get_nte_roles_keeps_existing_main_bind_role(self):
+        account = {
+            "access_token": "fresh",
+            "refresh_token": "r",
+            "device_id": "HT1",
+            "access_token_updated_at": int(time.time()),
+        }
+        roles_payload = {
+            "code": 0,
+            "data": {"bindRole": 116771663, "roles": [{"roleId": "116771663"}]},
+        }
+
+        with patch("hsr_daily._request_json", side_effect=[roles_payload]) as request_json:
+            _, roles = get_nte_roles(account)
+
+        self.assertEqual(len(roles), 1)
+        self.assertEqual(request_json.call_count, 1)
+
+    def test_format_nte_debug_lists_scalar_fields(self):
+        role = {"nickname": "塔吉多", "game_uid": "116771663"}
+        roles = [role]
+        note = {
+            "roleid": "116771663",
+            "dayvalue": 70,
+            "staminaValue": 3,
+            "areaProgress": [{"id": "1"}],
+            "achieveProgress": {"total": 100},
+        }
+
+        text = format_nte_debug(role, roles, note)
+
+        self.assertIn("绑定 UID：116771663", text)
+        self.assertIn("dayvalue: 70", text)
+        self.assertIn("staminaValue: 3", text)
+        self.assertIn("复杂字段", text)
+        self.assertIn("areaProgress", text)
+        self.assertNotIn("'id': '1'", text)
 
     def test_nte_reminder_reasons(self):
         note = {"dayvalue": 80, "citystaminaValue": 10, "citystaminaMaxValue": 100}

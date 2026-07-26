@@ -25,6 +25,7 @@ try:
         format_game_menu,
         format_help,
         format_nte_bind_guide,
+        format_nte_debug,
         format_note_status,
         format_not_bound,
         format_reminder_usage,
@@ -61,6 +62,7 @@ except ImportError:
         format_game_menu,
         format_help,
         format_nte_bind_guide,
+        format_nte_debug,
         format_note_status,
         format_not_bound,
         format_reminder_usage,
@@ -183,6 +185,8 @@ class EryouDailyPlugin(Star):
                     sender_key,
                     await self._confirm_qr(sender_key),
                 )
+        elif action == "debug":
+            reply = await self._debug_nte(sender_key, value)
         elif action == "reminder_set":
             reply = await self._set_reminder(event, sender_key, value)
         elif action == "unbind":
@@ -526,6 +530,39 @@ class EryouDailyPlugin(Star):
 
         self.bindings.set_tajiduo_account(sender_key, account)
         return format_note_status(GAME_KEY_NTE, binding["role"], note)
+
+    async def _debug_nte(self, sender_key: str, game_key: str) -> str:
+        if game_key and game_key != GAME_KEY_NTE:
+            return "目前只支持：/委托调试 异环"
+
+        account = self.bindings.get_tajiduo_account(sender_key)
+        if not account:
+            return "你还没有绑定异环。请先发送 /委托绑定 异环"
+
+        saver = self._tajiduo_saver(sender_key)
+        try:
+            account, roles = await asyncio.to_thread(get_nte_roles, account, saver)
+        except HsrApiError as exc:
+            if exc.status_code in {401, 402, 403}:
+                return "塔吉多登录态已失效，请重新发送 /委托绑定 异环 完成登录。"
+            return f"调试查询失败：{exc}"
+        except Exception as exc:
+            return f"调试查询失败：{exc}"
+
+        binding = self.bindings.get_game_binding(sender_key, GAME_KEY_NTE) or {}
+        role = binding.get("role") or (roles[0] if roles else None)
+        if not role:
+            return "这个塔吉多账号没有找到异环角色。"
+
+        try:
+            account, note = await asyncio.to_thread(fetch_nte_daily_note, account, role, saver)
+        except HsrApiError as exc:
+            return f"调试查询失败：{exc}"
+        except Exception as exc:
+            return f"调试查询失败：{exc}"
+
+        self.bindings.set_tajiduo_account(sender_key, account)
+        return format_nte_debug(role, roles, note)
 
     def _tajiduo_saver(self, sender_key: str):
         """token 刷新成功后立即落盘的回调；塔吉多 refresh token 轮换后旧 token 作废，

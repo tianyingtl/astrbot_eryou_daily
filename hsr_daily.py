@@ -325,6 +325,8 @@ def parse_commission_command(message: str) -> tuple[str, str] | None:
             return ("sms", rest[len("发码"):].strip())
         if rest.startswith("确认"):
             return ("confirm", rest[len("确认"):].strip())
+        if rest.startswith("调试"):
+            return ("debug", resolve_game_key(rest[len("调试"):].strip()) or "")
         if rest == "解绑":
             return ("unbind", "")
         game_key = resolve_game_key(rest)
@@ -396,6 +398,7 @@ def format_help() -> str:
             "/委托确认：米游社扫码确认后完成绑定",
             "/委托确认 验证码：异环短信验证后完成绑定",
             "/委托设置 星铁 20:00：到点未完成时在本群提醒你",
+            "/委托调试 异环：查看接口原始数据（排查用）",
             "/委托解绑：删除本地绑定",
         ]
     )
@@ -547,13 +550,18 @@ def get_nte_roles(
 
     if isinstance(data, list):
         raw_roles = data
+        bind_role_id = "0"
     elif isinstance(data, dict):
         raw_roles = data.get("roles") or []
+        bind_role_id = str(data.get("bindRole") or "0")
     else:
         raw_roles = []
+        bind_role_id = "0"
 
     roles = [_format_nte_role(role) for role in raw_roles if isinstance(role, dict)]
     if roles:
+        if bind_role_id == "0":
+            _ensure_nte_bind_role(account, roles[0], on_update)
         return account, roles
 
     bind_role = _tajiduo_request(
@@ -568,6 +576,24 @@ def get_nte_roles(
         if role.get("game_uid") and str(role["game_uid"]) != "0":
             roles.append(role)
     return account, roles
+
+
+def _ensure_nte_bind_role(account: dict[str, Any], role: dict[str, Any], on_update=None) -> None:
+    """账号没设主绑定角色时自动绑第一个（对齐 NTEUID 的 _ensure_bind_role）；
+    失败不阻断绑定流程。"""
+    role_id = str(role.get("game_uid") or "")
+    if not role_id or role_id == "0":
+        return
+    try:
+        _tajiduo_request(
+            account,
+            "/usercenter/api/bindGameRole",
+            body={"gameId": GAMES[GAME_KEY_NTE]["game_id"], "roleId": role_id},
+            method="POST",
+            on_update=on_update,
+        )
+    except HsrApiError:
+        pass
 
 
 def fetch_nte_daily_note(
@@ -898,6 +924,31 @@ def _format_nte_status(role: dict[str, Any], note: dict[str, Any]) -> str:
     else:
         lines.append("今天这关还没过：活跃度还没到 100，先补一下比较稳。")
 
+    return "\n".join(lines)
+
+
+def format_nte_debug(
+    role: dict[str, Any],
+    roles: list[dict[str, Any]],
+    note: dict[str, Any],
+) -> str:
+    """/委托调试 异环：列出 roleHome 原始标量字段，用于排查接口字段变化或数据不同步。"""
+    lines = [
+        "异环调试信息",
+        f"绑定 UID：{role.get('game_uid') or role.get('uid') or '未知'}",
+        f"账号角色：{_role_list_text(roles)}",
+        "—— roleHome 标量字段 ——",
+    ]
+    complex_keys = []
+    for key in sorted(note, key=str):
+        value = note[key]
+        if isinstance(value, (dict, list)):
+            complex_keys.append(str(key))
+        else:
+            lines.append(f"{key}: {value}")
+    if complex_keys:
+        lines.append("—— 复杂字段（内容省略）——")
+        lines.append("、".join(complex_keys))
     return "\n".join(lines)
 
 
