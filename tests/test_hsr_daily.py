@@ -17,6 +17,7 @@ from hsr_daily import (
     TAJIDUO_BASE_URL,
     _request_json,
     _tajiduo_request,
+    assess_nte_daily_note,
     fetch_nte_daily_note,
     format_game_menu,
     format_nte_debug,
@@ -25,6 +26,7 @@ from hsr_daily import (
     format_nte_bind_guide,
     format_note_status,
     is_daily_done,
+    hsr_reminder_reasons,
     nte_reminder_reasons,
     parse_commission_command,
     parse_reminder_value,
@@ -34,6 +36,45 @@ from hsr_daily import (
 
 
 class HsrDailyTest(unittest.TestCase):
+    def test_hsr_weekly_reminder_is_independent_of_daily_training(self):
+        note = {"current_train_score": 500, "max_train_score": 500,
+                "current_rogue_score": 12000, "max_rogue_score": 18000}
+        self.assertEqual(hsr_reminder_reasons(note), [])
+        self.assertEqual(
+            hsr_reminder_reasons(note, check_weekly=True),
+            ["每周积分还没满（当前 12000/18000）"],
+        )
+
+    def test_hsr_weekly_complete_and_daily_incomplete(self):
+        note = {"current_train_score": 100, "current_rogue_score": 18000}
+        self.assertEqual(hsr_reminder_reasons(note, check_weekly=True), ["每日实训还没完成"])
+        note["current_train_score"] = 500
+        self.assertEqual(hsr_reminder_reasons(note, check_weekly=True), [])
+
+    def test_hsr_weekly_uses_api_limit_and_not_synchronicity_points(self):
+        note = {"current_train_score": 500, "current_rogue_score": "14000",
+                "max_rogue_score": "14000", "rogue_tourn_weekly_cur": 0}
+        self.assertEqual(hsr_reminder_reasons(note, check_weekly=True), [])
+        note["max_rogue_score"] = 0
+        self.assertEqual(
+            hsr_reminder_reasons(note, check_weekly=True),
+            ["每周积分还没满（当前 14000/18000）"],
+        )
+
+    def test_hsr_missing_weekly_score_is_unknown_not_zero(self):
+        note = {"current_train_score": 500}
+        self.assertEqual(
+            hsr_reminder_reasons(note, check_weekly=True),
+            ["每周积分读取不完整，暂时无法确认是否已满，请到游戏内确认"],
+        )
+        text = format_note_status(GAME_KEY_HSR, {}, note)
+        self.assertIn("每周积分：未知/18000", text)
+
+    def test_hsr_query_displays_weekly_score(self):
+        note = {"current_train_score": 500, "current_rogue_score": 12000,
+                "max_rogue_score": 18000}
+        self.assertIn("每周积分：12000/18000", format_note_status(GAME_KEY_HSR, {}, note))
+
     def test_tajiduo_matches_reference_android_app_version(self):
         # 必须与安卓 App 抓包协议（NTEUID 参考实现）一致；官网 Web 版本号不通用
         self.assertEqual(TAJIDUO_APP_VERSION, "1.2.4")
@@ -281,7 +322,19 @@ class HsrDailyTest(unittest.TestCase):
             "citystaminaValue": 60,
             "citystaminaMaxValue": 100,
             "dayvalue": 100,
+            "roleloginDays": 21,
         }
+
+        note, _ = assess_nte_daily_note(
+            note,
+            {
+                "observed_date": "2026-07-28",
+                "role_login_days": 20,
+                "day_value": 100,
+                "trusted": True,
+            },
+            "2026-07-29",
+        )
 
         text = format_note_status(GAME_KEY_NTE, role, note)
 
@@ -290,6 +343,73 @@ class HsrDailyTest(unittest.TestCase):
         self.assertIn("都市活力：60/100", text)
         self.assertIn("活跃度：100/100，已完成", text)
         self.assertNotIn("今日活跃", text)
+
+    def test_first_full_nte_snapshot_is_unconfirmed(self):
+        role = {"nickname": "塔吉多", "game_uid": "116771663"}
+        note, snapshot = assess_nte_daily_note(
+            {"dayvalue": 100, "roleloginDays": 20},
+            None,
+            "2026-07-29",
+        )
+
+        text = format_note_status(GAME_KEY_NTE, role, note)
+
+        self.assertFalse(is_daily_done(GAME_KEY_NTE, note))
+        self.assertIn("活跃度：100/100，无法确认", text)
+        self.assertIn("塔吉多数据还没有刷新", text)
+        self.assertEqual(
+            nte_reminder_reasons(note),
+            ["塔吉多数据还停在上次同步（显示 100/100），无法确认今天已完成"],
+        )
+        self.assertFalse(snapshot["trusted"])
+
+    def test_unchanged_full_nte_snapshot_is_stale_after_date_changes(self):
+        note, snapshot = assess_nte_daily_note(
+            {"dayvalue": 100, "roleloginDays": 20},
+            {
+                "observed_date": "2026-07-28",
+                "role_login_days": 20,
+                "day_value": 100,
+                "trusted": True,
+            },
+            "2026-07-29",
+        )
+
+        self.assertFalse(is_daily_done(GAME_KEY_NTE, note))
+        self.assertFalse(snapshot["trusted"])
+        self.assertTrue(nte_reminder_reasons(note))
+
+    def test_nte_login_day_advance_confirms_full_snapshot(self):
+        note, snapshot = assess_nte_daily_note(
+            {"dayvalue": 100, "roleloginDays": 21},
+            {
+                "observed_date": "2026-07-28",
+                "role_login_days": 20,
+                "day_value": 100,
+                "trusted": True,
+            },
+            "2026-07-29",
+        )
+
+        self.assertTrue(is_daily_done(GAME_KEY_NTE, note))
+        self.assertTrue(snapshot["trusted"])
+        self.assertEqual(nte_reminder_reasons(note), [])
+
+    def test_nte_progress_seen_today_can_later_confirm_full_snapshot(self):
+        partial_note, partial_snapshot = assess_nte_daily_note(
+            {"dayvalue": 80, "roleloginDays": 21},
+            None,
+            "2026-07-29",
+        )
+        full_note, full_snapshot = assess_nte_daily_note(
+            {"dayvalue": 100, "roleloginDays": 21},
+            partial_snapshot,
+            "2026-07-29",
+        )
+
+        self.assertFalse(is_daily_done(GAME_KEY_NTE, partial_note))
+        self.assertTrue(is_daily_done(GAME_KEY_NTE, full_note))
+        self.assertTrue(full_snapshot["trusted"])
 
     def test_format_nte_status_reads_fields_case_insensitively(self):
         role = {"nickname": "塔吉多", "game_uid": "116771663"}
@@ -423,6 +543,28 @@ class HsrDailyTest(unittest.TestCase):
         self.assertEqual(cookie, "ltoken=abc")
         self.assertEqual(account["center_uid"], "9")
         self.assertEqual(binding["role"]["game_uid"], "116771663")
+
+    def test_store_persists_nte_daily_snapshot(self):
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "bindings.json"
+            store = BindingStore(path)
+            store.set_tajiduo_binding(
+                "123",
+                {"access_token": "a", "refresh_token": "r"},
+                {"game_uid": "116771663", "nickname": "塔吉多"},
+            )
+            expected = {
+                "observed_date": "2026-07-29",
+                "role_login_days": 20,
+                "day_value": 100,
+                "trusted": False,
+            }
+            store.set_nte_daily_snapshot("123", "116771663", expected)
+
+            reloaded = BindingStore(path)
+            actual = reloaded.get_nte_daily_snapshot("123", "116771663")
+
+        self.assertEqual(actual, expected)
 
     def test_set_reminder_can_skip_today(self):
         with TemporaryDirectory() as temp_dir:

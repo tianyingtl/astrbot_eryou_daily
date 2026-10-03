@@ -18,6 +18,7 @@ try:
         GAME_KEY_NTE,
         BindingStore,
         HsrApiError,
+        assess_nte_daily_note,
         create_qr_login,
         daily_missing_text,
         fetch_daily_note,
@@ -35,6 +36,7 @@ try:
         get_login_cookie_by_qr,
         login_nte_by_sms,
         is_daily_done,
+        hsr_reminder_reasons,
         is_supported_game,
         make_nte_device_id,
         nte_reminder_reasons,
@@ -55,6 +57,7 @@ except ImportError:
         GAME_KEY_NTE,
         BindingStore,
         HsrApiError,
+        assess_nte_daily_note,
         create_qr_login,
         daily_missing_text,
         fetch_daily_note,
@@ -72,6 +75,7 @@ except ImportError:
         get_login_cookie_by_qr,
         login_nte_by_sms,
         is_daily_done,
+        hsr_reminder_reasons,
         is_supported_game,
         make_nte_device_id,
         nte_reminder_reasons,
@@ -260,6 +264,8 @@ class EryouDailyPlugin(Star):
             last_reminded_date,
         )
         reply = f"已设置提醒：每天 {reminder_time} 检查{game_name(game_key)}。如果还没完成，会在本群 at 你。"
+        if game_key == GAME_KEY_HSR:
+            reply += f"\n每周日 {reminder_time} 还会检查每周积分，未满时也会在本群 at 你。"
         return f"{reply}\n{note}" if note else reply
 
     async def _start_qr(self, sender_key: str, game_key: str) -> tuple[str, Path | None]:
@@ -529,6 +535,7 @@ class EryouDailyPlugin(Star):
             return f"查询失败：{exc}"
 
         self.bindings.set_tajiduo_account(sender_key, account)
+        note = self._assess_nte_note(sender_key, binding["role"], note)
         return format_note_status(GAME_KEY_NTE, binding["role"], note)
 
     async def _debug_nte(self, sender_key: str, game_key: str) -> str:
@@ -562,7 +569,21 @@ class EryouDailyPlugin(Star):
             return f"调试查询失败：{exc}"
 
         self.bindings.set_tajiduo_account(sender_key, account)
+        self._assess_nte_note(sender_key, role, note)
         return format_nte_debug(role, roles, note)
+
+    def _assess_nte_note(
+        self,
+        sender_key: str,
+        role: dict,
+        note: dict,
+        observed_date: str | None = None,
+    ) -> dict:
+        role_id = str(role.get("game_uid") or role.get("uid") or "")
+        previous = self.bindings.get_nte_daily_snapshot(sender_key, role_id)
+        assessed, snapshot = assess_nte_daily_note(note, previous, observed_date)
+        self.bindings.set_nte_daily_snapshot(sender_key, role_id, snapshot)
+        return assessed
 
     def _tajiduo_saver(self, sender_key: str):
         """token 刷新成功后立即落盘的回调；塔吉多 refresh token 轮换后旧 token 作废，
@@ -620,6 +641,7 @@ class EryouDailyPlugin(Star):
                         self._tajiduo_saver(sender_key),
                     )
                     self.bindings.set_tajiduo_account(sender_key, account)
+                    note = self._assess_nte_note(sender_key, binding["role"], note, today)
                 else:
                     cookie = self.bindings.get_account_cookie(sender_key)
                     if not cookie:
@@ -629,7 +651,13 @@ class EryouDailyPlugin(Star):
             except Exception:
                 continue
 
-            if game_key == GAME_KEY_NTE:
+            if game_key == GAME_KEY_HSR:
+                reasons = hsr_reminder_reasons(note, check_weekly=now.weekday() == 6)
+                if not reasons:
+                    self.bindings.mark_reminded(sender_key, group_id, game_key, today)
+                    continue
+                reminder_text = " 娜娜米提醒：星铁" + "；".join(reasons) + "。记得确认一下，别漏掉奖励。"
+            elif game_key == GAME_KEY_NTE:
                 reasons = nte_reminder_reasons(note, check_city_stamina=now.weekday() == 6)
                 if not reasons:
                     self.bindings.mark_reminded(sender_key, group_id, game_key, today)

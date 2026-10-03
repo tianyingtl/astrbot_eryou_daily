@@ -100,6 +100,7 @@ DS_SALT = "xV8v4Qu54lUKrEYFZkJhB8cuOh9Asafs"
 DEVICE_ID = "AFA5DBD7-D027-402B-9522-1D9A4A5EFB85"
 DEVICE_FP = "38d7f349e93d8"
 TIMEOUT_SECONDS = 8
+_NTE_SNAPSHOT_TRUSTED_KEY = "_eryou_daily_snapshot_trusted"
 
 
 class HsrApiError(RuntimeError):
@@ -154,7 +155,15 @@ class BindingStore:
             saved = dict(account)
             saved["provider"] = "tajiduo"
             user.setdefault("accounts", {})["tajiduo"] = saved
-            user.setdefault("games", {})[GAME_KEY_NTE] = {"role": role}
+            games = user.setdefault("games", {})
+            old_binding = games.get(GAME_KEY_NTE) or {}
+            old_role = old_binding.get("role") or {}
+            old_uid = str(old_role.get("game_uid") or old_role.get("uid") or "")
+            new_uid = str(role.get("game_uid") or role.get("uid") or "")
+            new_binding = {"role": role}
+            if old_uid and old_uid == new_uid and isinstance(old_binding.get("daily_snapshot"), dict):
+                new_binding["daily_snapshot"] = old_binding["daily_snapshot"]
+            games[GAME_KEY_NTE] = new_binding
             self._save(data)
 
     def get_game_binding(self, sender_key: str, game_key: str) -> dict[str, Any] | None:
@@ -168,6 +177,33 @@ class BindingStore:
             data = self._load()
             user = data.setdefault("users", {}).setdefault(sender_key, {})
             user.setdefault("games", {})[game_key] = {"role": role}
+            self._save(data)
+
+    def get_nte_daily_snapshot(self, sender_key: str, role_id: str) -> dict[str, Any] | None:
+        binding = self.get_game_binding(sender_key, GAME_KEY_NTE) or {}
+        role = binding.get("role") or {}
+        bound_uid = str(role.get("game_uid") or role.get("uid") or "")
+        snapshot = binding.get("daily_snapshot")
+        if bound_uid != str(role_id) or not isinstance(snapshot, dict):
+            return None
+        return dict(snapshot)
+
+    def set_nte_daily_snapshot(
+        self,
+        sender_key: str,
+        role_id: str,
+        snapshot: dict[str, Any],
+    ) -> None:
+        with self._lock:
+            data = self._load()
+            user = data.setdefault("users", {}).setdefault(sender_key, {})
+            binding = user.setdefault("games", {}).get(GAME_KEY_NTE) or {}
+            role = binding.get("role") or {}
+            bound_uid = str(role.get("game_uid") or role.get("uid") or "")
+            if bound_uid != str(role_id):
+                return
+            binding["daily_snapshot"] = dict(snapshot)
+            user["games"][GAME_KEY_NTE] = binding
             self._save(data)
 
     def get_reminders(self) -> list[tuple[str, dict[str, Any]]]:
@@ -817,12 +853,14 @@ def _format_hsr_status(role: dict[str, Any], note: dict[str, Any]) -> str:
     max_stamina = _first_int(note, "max_stamina", "stamina_max") or 240
     reserve_stamina = _first_int(note, "current_reserve_stamina", "reserve_stamina")
     train_done = is_train_done(note)
+    weekly_score, weekly_max = _hsr_weekly_score(note)
 
     lines = [
         "娜娜米提醒：星铁今日委托检查",
         f"账号：{nickname}（UID {uid}）",
         f"开拓力：{_score_text(current_stamina)}/{max_stamina}",
         f"每日实训：{_score_text(current_train)}/{max_train}，{'已完成' if train_done else '未完成'}",
+        f"每周积分：{_score_text(weekly_score)}/{weekly_max}（差分宇宙 / 货币战争等共享积分）",
     ]
     if reserve_stamina is not None:
         lines.append(f"后备开拓力：{reserve_stamina}")
@@ -905,6 +943,11 @@ def _format_nte_status(role: dict[str, Any], note: dict[str, Any]) -> str:
     max_city_stamina = _nte_int(note, "citystaminaMaxValue") or 100
     day_value = _nte_int(note, "dayvalue")
     done = is_nte_done(note)
+    unconfirmed = (
+        day_value is not None
+        and day_value >= 100
+        and note.get(_NTE_SNAPSHOT_TRUSTED_KEY) is False
+    )
 
     lines = [
         "娜娜米提醒：异环今日委托检查",
@@ -916,10 +959,13 @@ def _format_nte_status(role: dict[str, Any], note: dict[str, Any]) -> str:
     lines.extend([
         f"本性像素：{_score_text(stamina)}/{max_stamina}",
         f"都市活力：{_score_text(city_stamina)}/{max_city_stamina}",
-        f"活跃度：{_score_text(day_value)}/100，{'已完成' if done else '未完成'}",
+        f"活跃度：{_score_text(day_value)}/100，"
+        f"{'无法确认' if unconfirmed else ('已完成' if done else '未完成')}",
     ])
 
-    if done:
+    if unconfirmed:
+        lines.append("塔吉多数据还没有刷新，当前 100/100 可能是上次快照；提醒会按未完成处理。")
+    elif done:
         lines.append("今天这关已经通过了，可以稍微休息一下。")
     else:
         lines.append("今天这关还没过：活跃度还没到 100，先补一下比较稳。")
@@ -958,6 +1004,23 @@ def is_train_done(note: dict[str, Any]) -> bool:
     return current_train is not None and current_train >= max_train
 
 
+def _hsr_weekly_score(note: dict[str, Any]) -> tuple[int | None, int]:
+    current = _first_int(note, "current_rogue_score")
+    maximum = _first_int(note, "max_rogue_score")
+    return current, maximum if maximum is not None and maximum > 0 else 18000
+
+
+def hsr_reminder_reasons(note: dict[str, Any], check_weekly: bool = False) -> list[str]:
+    reasons = [] if is_train_done(note) else ["每日实训还没完成"]
+    if check_weekly:
+        current, maximum = _hsr_weekly_score(note)
+        if current is None or current < 0:
+            reasons.append("每周积分读取不完整，暂时无法确认是否已满，请到游戏内确认")
+        elif current < maximum:
+            reasons.append(f"每周积分还没满（当前 {current}/{maximum}）")
+    return reasons
+
+
 def is_genshin_done(note: dict[str, Any]) -> bool:
     current = _first_int(note, "current_commission_num")
     max_count = _first_int(note, "max_commission_num") or 4
@@ -969,15 +1032,73 @@ def is_zzz_done(note: dict[str, Any]) -> bool:
     return current is not None and current >= max_count
 
 
+def assess_nte_daily_note(
+    note: dict[str, Any],
+    previous_snapshot: dict[str, Any] | None,
+    observed_date: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """标记塔吉多快照是否足以证明当天活跃度已完成。
+
+    roleHome 没有数据更新时间；首次或跨日仍返回满活跃度时，只有累计
+    活跃天数推进，或当天已经观察到活跃度变化，才能确认不是旧快照。
+    """
+    observed_date = observed_date or time.strftime("%Y-%m-%d")
+    previous = previous_snapshot if isinstance(previous_snapshot, dict) else {}
+    day_value = _nte_int(note, "dayvalue")
+    role_login_days = _nte_int(note, "roleloginDays")
+
+    def optional_int(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    previous_date = str(previous.get("observed_date") or "")
+    previous_day_value = optional_int(previous.get("day_value"))
+    previous_login_days = optional_int(previous.get("role_login_days"))
+    same_date = previous_date == observed_date
+    login_days_advanced = (
+        role_login_days is not None
+        and previous_login_days is not None
+        and role_login_days > previous_login_days
+    )
+    day_value_changed_today = (
+        same_date
+        and day_value is not None
+        and previous_day_value is not None
+        and day_value != previous_day_value
+    )
+
+    trusted = day_value is not None and day_value < 100
+    if day_value is not None and day_value >= 100:
+        trusted = login_days_advanced or day_value_changed_today
+        if same_date and bool(previous.get("trusted")):
+            trusted = True
+
+    assessed = dict(note)
+    assessed[_NTE_SNAPSHOT_TRUSTED_KEY] = trusted
+    snapshot = {
+        "observed_date": observed_date,
+        "role_login_days": role_login_days,
+        "day_value": day_value,
+        "trusted": trusted,
+    }
+    return assessed, snapshot
+
+
 def is_nte_done(note: dict[str, Any]) -> bool:
     day_value = _nte_int(note, "dayvalue")
+    if note.get(_NTE_SNAPSHOT_TRUSTED_KEY) is False:
+        return False
     return day_value is not None and day_value >= 100
 
 
 def nte_reminder_reasons(note: dict[str, Any], check_city_stamina: bool = False) -> list[str]:
     reasons = []
     day_value = _nte_int(note, "dayvalue")
-    if day_value is None or day_value < 100:
+    if day_value is not None and day_value >= 100 and note.get(_NTE_SNAPSHOT_TRUSTED_KEY) is False:
+        reasons.append("塔吉多数据还停在上次同步（显示 100/100），无法确认今天已完成")
+    elif day_value is None or day_value < 100:
         reasons.append(f"活跃度还没到 100（当前 {_score_text(day_value)}/100）")
 
     if check_city_stamina:
