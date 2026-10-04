@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from base64 import b64encode
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -20,6 +21,7 @@ GAME_KEY_HSR = "hkrpg"
 GAME_KEY_GENSHIN = "genshin"
 GAME_KEY_ZZZ = "zzz"
 GAME_KEY_NTE = "nte"
+PLUGIN_DATA_DIR_NAME = "astrbot_eryou_daily"
 GAMES = {
     GAME_KEY_HSR: {
         "name": "崩坏：星穹铁道",
@@ -320,13 +322,42 @@ class BindingStore:
 
 
 def resolve_binding_path(plugin_dir: Path, home_dir: Path | None = None) -> Path:
-    old_path = plugin_dir / "data" / "bindings.json"
     home = Path(home_dir) if home_dir is not None else Path.home()
-    new_path = home / ".astrbot_eryou_daily" / "bindings.json"
+    plugin_data_dir = plugin_dir.parent.parent / "plugin_data" / PLUGIN_DATA_DIR_NAME
+    new_path = plugin_data_dir / "bindings.json"
+    legacy_dirs = [plugin_dir / "data", home / ".astrbot_eryou_daily"]
 
-    if old_path.exists() and not new_path.exists():
+    legacy_bindings = [path / "bindings.json" for path in legacy_dirs if (path / "bindings.json").exists()]
+    selected_path = None
+    if legacy_bindings and not new_path.exists():
         new_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(old_path, new_path)
+        selected_path = max(legacy_bindings, key=lambda path: path.stat().st_mtime)
+        shutil.move(str(selected_path), str(new_path))
+
+    for old_path in legacy_bindings:
+        if old_path == selected_path:
+            continue
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        backup_path = new_path.parent / f"bindings.{old_path.parent.name}.legacy.json"
+        suffix = 1
+        while backup_path.exists():
+            backup_path = new_path.parent / f"bindings.{old_path.parent.name}.legacy-{suffix}.json"
+            suffix += 1
+        shutil.move(str(old_path), str(backup_path))
+
+    for legacy_dir in legacy_dirs:
+        if not legacy_dir.exists():
+            continue
+        for image_path in legacy_dir.glob("qr_*.png"):
+            target_path = new_path.parent / image_path.name
+            suffix = 1
+            while target_path.exists():
+                target_path = new_path.parent / f"{image_path.stem}-{suffix}{image_path.suffix}"
+                suffix += 1
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(image_path), str(target_path))
+        with suppress(OSError):
+            legacy_dir.rmdir()
     return new_path
 
 
@@ -473,7 +504,7 @@ def format_nte_bind_guide() -> str:
             "收到短信验证码后发送：/委托确认 验证码",
             "示例：/委托发码 13800138000",
             "如果有多个角色，可以先在群里发送：/委托绑定 异环 UID",
-            "说明：手机号和验证码只用于本次登录，插件会保存塔吉多 token 到用户目录下的 .astrbot_eryou_daily。",
+            "说明：手机号和验证码只用于本次登录，插件会保存塔吉多 token 到 AstrBot 插件数据目录。",
         ]
     )
 

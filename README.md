@@ -3,7 +3,7 @@
 <div align="center">
 
 ![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-blue)
-![Version](https://img.shields.io/badge/version-v1.0.11-green)
+![Version](https://img.shields.io/badge/version-v1.0.12-green)
 ![Platform](https://img.shields.io/badge/platform-QQ%20Group-lightgrey)
 
 二游每日状态检查插件。支持在 QQ 群/私聊中查询星铁、原神、绝区零、异环每日完成情况和体力状态，并为未完成的每日设置群内 at 提醒。
@@ -30,7 +30,7 @@
 - 查询结果显示体力/资源：开拓力、原粹树脂、电量、本性像素、都市活力。
 - 支持 `/委托设置 游戏名 时间`，到点未完成时在当前群 at 提醒。
 - 支持 AstrBot WebUI 配置群白名单/黑名单。
-- 不提交、不内置任何真实 Cookie；绑定数据保存在用户目录，卸载重装插件后仍会保留。
+- 不提交、不内置任何真实 Cookie；绑定数据保存在 AstrBot 插件数据目录，卸载重装插件后仍会保留。
 
 ## 支持游戏
 
@@ -94,7 +94,7 @@ pip install -r requirements.txt
 /委托确认 123456
 ```
 
-请在私聊里发送手机号和验证码。插件只保存塔吉多 token 到本机用户目录，不会把手机号、验证码、token 提交到仓库。
+请在私聊里发送手机号和验证码。插件只保存塔吉多 token 到 AstrBot 插件数据目录，不会把手机号、验证码、token 提交到仓库。
 
 ### 检查每日
 
@@ -158,21 +158,21 @@ pip install -r requirements.txt
 
 ## 数据与安全
 
-v1.0.5 起，绑定数据保存在用户目录，不再放在插件目录里：
+v1.0.12 起，绑定数据保存在 AstrBot 规范的插件数据目录，不再放在插件目录或用户 Home 目录：
 
 ```text
-%USERPROFILE%\.astrbot_eryou_daily\bindings.json
+data/plugin_data/astrbot_eryou_daily/bindings.json
 ```
 
-Linux/macOS 对应路径为：
+其中 `data` 是运行 AstrBot 的数据目录。Docker 部署时，如果宿主机把 `/root/data` 挂载到容器 `/AstrBot/data`，宿主机对应文件为：
 
 ```text
-~/.astrbot_eryou_daily/bindings.json
+/root/data/plugin_data/astrbot_eryou_daily/bindings.json
 ```
 
-从 v1.0.4 或更早版本升级时，如果旧的 `data/bindings.json` 还在插件目录内，插件会在启动时自动复制到新位置。复制完成后，之后卸载、删除、重新安装插件目录，绑定数据仍会留在用户目录。
+从 v1.0.4 及更早版本的插件目录数据、或 v1.0.5 至 v1.0.11 的用户 Home 目录数据升级时，插件会在启动时自动迁移。常规迁移会把旧 `bindings.json` 移动到规范位置；如果规范位置已经有数据，则把旧文件移动到同一规范目录下的 `bindings.*.legacy.json` 备份，避免旧 Cookie 留在用户 Home 目录。旧二维码图片也会一并移入规范目录。
 
-如果旧插件目录已经被删除，里面的旧 `data/bindings.json` 也已经没了，插件无法凭空恢复旧绑定，需要重新绑定。公开仓库、提交 PR、上传插件市场前，请不要提交真实 Cookie、绑定文件、二维码图片或包含账号凭证的日志。
+如果旧数据文件已经被手动删除，插件无法凭空恢复旧绑定，需要重新绑定。公开仓库、提交 PR、上传插件市场前，请不要提交真实 Cookie、绑定文件、二维码图片或包含账号凭证的日志。
 
 ## 常见问题
 
@@ -200,9 +200,14 @@ Linux/macOS 对应路径为：
 
 ### 重装插件后绑定还在吗？
 
-v1.0.5 起会保留。数据在 `%USERPROFILE%\.astrbot_eryou_daily\bindings.json`，不在插件目录里。卸载或覆盖安装插件不会删除这个文件。
+v1.0.12 起会保留。数据在 `data/plugin_data/astrbot_eryou_daily/bindings.json`，不在插件目录里。卸载或覆盖安装插件不会删除这个文件。
 
 ## 更新日志
+
+### v1.0.12
+
+- 绑定数据、塔吉多 token 和二维码图片统一保存到 AstrBot 规范插件数据目录 `data/plugin_data/astrbot_eryou_daily/`。
+- 启动时自动迁移插件目录和用户 Home 目录中的旧绑定数据；规范目录已有数据时，旧凭据会移动到同目录 legacy 备份，不再留在外面。
 
 ### v1.0.11
 
@@ -214,7 +219,7 @@ v1.0.5 起会保留。数据在 `%USERPROFILE%\.astrbot_eryou_daily\bindings.jso
 
 - 异环增加跨日旧快照识别，缓存的昨日 `100/100` 不再误判为今日完成。
 - 数据未同步时明确显示“无法确认”，定时任务按未完成提醒。
-- 异环快照基线保存在用户目录，重装插件后仍保留。
+- 异环快照基线保存在绑定数据文件中，重装插件后仍保留。
 
 ### v1.0.9
 
@@ -242,7 +247,7 @@ v1.0.5 起会保留。数据在 `%USERPROFILE%\.astrbot_eryou_daily\bindings.jso
 
 ### v1.0.5
 
-- 绑定数据迁移到用户目录，卸载重装插件后仍会保留。
+- 绑定数据移出插件目录，卸载重装插件后仍会保留。
 - 旧版 `data/bindings.json` 存在时会自动迁移。
 - 异环“今日活跃”改名为“活跃度”，避免和绝区零文案混淆。
 - 异环支持 `/委托绑定 异环 UID` 指定角色，多角色账号不再默认选择第一个。

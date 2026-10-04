@@ -1,5 +1,6 @@
 import unittest
 import json
+import os
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -515,16 +516,95 @@ class HsrDailyTest(unittest.TestCase):
     def test_resolve_binding_path_migrates_old_plugin_data(self):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            plugin_dir = root / "plugin"
+            plugin_dir = root / "AstrBot" / "data" / "plugins" / "astrbot_eryou_daily"
             home_dir = root / "home"
             old_path = plugin_dir / "data" / "bindings.json"
+            qr_path = old_path.parent / "qr_123.png"
             old_path.parent.mkdir(parents=True)
             old_data = {"users": {"123": {"games": {}}}}
             old_path.write_text(json.dumps(old_data), encoding="utf-8")
+            qr_path.write_bytes(b"qr")
 
             new_path = resolve_binding_path(plugin_dir, home_dir)
-            self.assertEqual(new_path, home_dir / ".astrbot_eryou_daily" / "bindings.json")
+            self.assertEqual(
+                new_path,
+                root / "AstrBot" / "data" / "plugin_data" / "astrbot_eryou_daily" / "bindings.json",
+            )
             self.assertEqual(json.loads(new_path.read_text(encoding="utf-8")), old_data)
+            self.assertEqual((new_path.parent / "qr_123.png").read_bytes(), b"qr")
+            self.assertFalse(old_path.parent.exists())
+
+    def test_resolve_binding_path_migrates_legacy_home_data(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plugin_dir = root / "AstrBot" / "data" / "plugins" / "astrbot_eryou_daily"
+            plugin_dir.mkdir(parents=True)
+            home_dir = root / "home"
+            old_dir = home_dir / ".astrbot_eryou_daily"
+            old_dir.mkdir(parents=True)
+            old_data = {"users": {"123": {"games": {}}}}
+            (old_dir / "bindings.json").write_text(json.dumps(old_data), encoding="utf-8")
+            (old_dir / "qr_123.png").write_bytes(b"qr")
+
+            new_path = resolve_binding_path(plugin_dir, home_dir)
+
+            self.assertEqual(json.loads(new_path.read_text(encoding="utf-8")), old_data)
+            self.assertEqual((new_path.parent / "qr_123.png").read_bytes(), b"qr")
+            self.assertFalse(old_dir.exists())
+
+    def test_resolve_binding_path_keeps_newest_legacy_data(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plugin_dir = root / "AstrBot" / "data" / "plugins" / "astrbot_eryou_daily"
+            home_dir = root / "home"
+            plugin_old_dir = plugin_dir / "data"
+            plugin_old_dir.mkdir(parents=True)
+            home_old_dir = home_dir / ".astrbot_eryou_daily"
+            home_old_dir.mkdir(parents=True)
+            plugin_data = {"source": "plugin"}
+            home_data = {"source": "home"}
+            plugin_binding = plugin_old_dir / "bindings.json"
+            home_binding = home_old_dir / "bindings.json"
+            plugin_binding.write_text(json.dumps(plugin_data), encoding="utf-8")
+            home_binding.write_text(json.dumps(home_data), encoding="utf-8")
+            os.utime(plugin_binding, (100, 100))
+            os.utime(home_binding, (200, 200))
+
+            new_path = resolve_binding_path(plugin_dir, home_dir)
+
+            self.assertEqual(json.loads(new_path.read_text(encoding="utf-8")), home_data)
+
+    def test_resolve_binding_path_moves_residual_legacy_data(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plugin_dir = root / "AstrBot" / "data" / "plugins" / "astrbot_eryou_daily"
+            home_dir = root / "home"
+            new_path = (
+                root
+                / "AstrBot"
+                / "data"
+                / "plugin_data"
+                / "astrbot_eryou_daily"
+                / "bindings.json"
+            )
+            old_dir = home_dir / ".astrbot_eryou_daily"
+            old_dir.mkdir(parents=True)
+            new_path.parent.mkdir(parents=True)
+            new_data = {"source": "standard"}
+            old_data = {"source": "legacy"}
+            new_path.write_text(json.dumps(new_data), encoding="utf-8")
+            (old_dir / "bindings.json").write_text(json.dumps(old_data), encoding="utf-8")
+            (new_path.parent / "qr_123.png").write_bytes(b"new")
+            (old_dir / "qr_123.png").write_bytes(b"old")
+
+            resolved_path = resolve_binding_path(plugin_dir, home_dir)
+
+            self.assertEqual(resolved_path, new_path)
+            self.assertEqual(json.loads(new_path.read_text(encoding="utf-8")), new_data)
+            backup_path = new_path.parent / "bindings..astrbot_eryou_daily.legacy.json"
+            self.assertEqual(json.loads(backup_path.read_text(encoding="utf-8")), old_data)
+            self.assertEqual((new_path.parent / "qr_123-1.png").read_bytes(), b"old")
+            self.assertFalse(old_dir.exists())
 
     def test_store_keeps_mihoyo_and_tajiduo_accounts(self):
         with TemporaryDirectory() as temp_dir:
