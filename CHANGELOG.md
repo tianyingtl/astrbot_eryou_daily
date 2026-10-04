@@ -1,5 +1,9 @@
 # 更新日志
 
+## v1.0.13
+
+- 复审发版：版本号提升至 v1.0.13，插件行为与 v1.0.12 一致。
+
 ## v1.0.12
 
 - 绑定数据、塔吉多 token 和二维码图片统一保存到 AstrBot 规范插件数据目录：`data/plugin_data/astrbot_eryou_daily/`。
