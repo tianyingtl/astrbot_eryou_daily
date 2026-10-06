@@ -453,7 +453,7 @@ def supports_tajiduo_login(game_key: str) -> bool:
 def format_help() -> str:
     return "\n".join(
         [
-            "二游每日检查：",
+            "二游日常委托提醒：",
             "/委托：检查已绑定游戏的今日每日状态",
             "/委托 星铁/原神/绝区零/异环：检查指定游戏",
             "/委托绑定：选择要绑定的游戏",
