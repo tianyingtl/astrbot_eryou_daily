@@ -19,7 +19,7 @@
     "name": "astrbot_plugin_image2_draw",
     "market_plugin_id": "tianyingtl/astrbot_plugin_image2_draw",
     "display_name": "Image2 绘图",
-    "desc": "使用 /draw 进行文字绘图和参考图修改，并支持可选的提示词优化模型。",
+    "desc": "支持自然语言调用、文字绘图和参考图修改，提供比例、分辨率、风格等后缀参数及参数预览。",
     "author": "tianying",
     "repo": "https://github.com/tianyingtl/astrbot_plugin_image2_draw",
     "tags": [
@@ -29,7 +29,7 @@
       "提示词"
     ],
     "social_link": "https://github.com/tianyingtl/astrbot_plugin_image2_draw",
-    "version": "v1.0.13"
+    "version": "v1.0.15"
   },
   "astrbot_plugin_dlut_xingce": {
     "name": "astrbot_plugin_dlut_xingce",
